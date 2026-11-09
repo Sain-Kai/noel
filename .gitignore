@@ -1,0 +1,11 @@
+*.o
+*.tmp
+aether
+noel
+benchmark
+benchmark_cpu_offload
+generate_weights
+test_engine
+data/*.aether
+data/*.noel
+data/*.tmp
