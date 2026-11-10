@@ -9,3 +9,4 @@ test_engine
 data/*.aether
 data/*.noel
 data/*.tmp
+*.so

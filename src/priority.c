@@ -103,8 +103,30 @@ bool aether_priority_init(aether_priority_mgr_t *mgr, const aether_config_t *cfg
         }
     }
 
-    aether_priority_recompute_ranks(mgr);
-    aether_priority_rebalance_tiers(mgr);
+    size_t total_model_bytes = 0;
+    for (int i = 0; i < idx; i++) {
+        total_model_bytes += mgr->components[i].size_bytes;
+    }
+
+    if (cfg->execution_mode == NOEL_MODE_MONOLITHIC_GPU || 
+       (cfg->execution_mode == NOEL_MODE_AUTO && total_model_bytes <= vram_budget)) {
+        mgr->active_mode = NOEL_MODE_MONOLITHIC_GPU;
+        printf("[Auto-Tiering] Activated Mode 1: Pure Monolithic GPU (Model: %.2f GiB <= VRAM: %.2f GiB)\n",
+               (double)total_model_bytes / (1024.0 * 1024.0 * 1024.0),
+               (double)vram_budget / (1024.0 * 1024.0 * 1024.0));
+        for (int i = 0; i < idx; i++) {
+            mgr->components[i].assigned_tier = TIER_VRAM;
+        }
+        mgr->vram_used_bytes = total_model_bytes;
+        mgr->ram_used_bytes = 0;
+    } else {
+        mgr->active_mode = NOEL_MODE_HETEROGENEOUS_4TIER;
+        printf("[Auto-Tiering] Activated Mode 2: 4-Tier Heterogeneous HPRTA (Model: %.2f GiB > VRAM: %.2f GiB)\n",
+               (double)total_model_bytes / (1024.0 * 1024.0 * 1024.0),
+               (double)vram_budget / (1024.0 * 1024.0 * 1024.0));
+        aether_priority_recompute_ranks(mgr);
+        aether_priority_rebalance_tiers(mgr);
+    }
     return true;
 }
 
@@ -147,6 +169,13 @@ void aether_priority_recompute_ranks(aether_priority_mgr_t *mgr) {
 
 void aether_priority_rebalance_tiers(aether_priority_mgr_t *mgr) {
     if (!mgr || !mgr->components) return;
+
+    if (mgr->active_mode == NOEL_MODE_MONOLITHIC_GPU) {
+        for (int i = 0; i < mgr->total_components; i++) {
+            mgr->components[i].assigned_tier = TIER_VRAM;
+        }
+        return;
+    }
 
     size_t vram_used = 0;
     size_t ram_used = 0;

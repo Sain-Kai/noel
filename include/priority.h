@@ -53,6 +53,7 @@ typedef struct {
     size_t ram_used_bytes;
     float ema_decay;           /* EMA decay factor (e.g. 0.95) */
     uint64_t total_tokens_observed;
+    noel_execution_mode_t active_mode; /* Dynamic auto-tiering state */
 } aether_priority_mgr_t;
 
 /* Initialize priority manager for given model configuration and tier budgets */

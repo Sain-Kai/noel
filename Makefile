@@ -5,10 +5,13 @@ LDFLAGS = -fopenmp -pthread -ldl -lm
 SRCS = src/hardware.c src/simd_vnni.c src/cuda_backend.c src/nvme_streamer.c src/sparsity.c src/priority.c src/pipeline_stages.c src/tokenizer.c src/engine.c
 OBJS = $(SRCS:.c=.o)
 
-all: noel aether benchmark generate_weights benchmark_cpu_offload test_engine
+all: noel aether benchmark generate_weights benchmark_cpu_offload test_engine libnoel.so
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+libnoel.so: $(SRCS)
+	$(CC) -fPIC -shared $(CFLAGS) $(SRCS) $(LDFLAGS) -o libnoel.so
 
 noel: $(OBJS) src/main.o
 	$(CC) $(OBJS) src/main.o $(LDFLAGS) -o noel
@@ -32,6 +35,6 @@ test: test_engine
 	./test_engine
 
 clean:
-	rm -f src/*.o tools/*.o tests/*.o noel aether benchmark generate_weights benchmark_cpu_offload test_engine
+	rm -f src/*.o tools/*.o tests/*.o noel aether benchmark generate_weights benchmark_cpu_offload test_engine libnoel.so *.so
 
 .PHONY: all test clean

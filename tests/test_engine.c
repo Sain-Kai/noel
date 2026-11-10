@@ -239,6 +239,87 @@ static bool test_cuda_backend(void) {
     return false;
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 8: Active CUDA GEMV & Pinned Host Memory Allocation           */
+/* ------------------------------------------------------------------ */
+static bool test_cuda_active_gemv(void) {
+    if (!aether_cuda_init()) return false;
+
+    /* 1. Test Pinned Host Memory */
+    void *h_mem = aether_cuda_host_alloc(64 * 1024);
+    if (!h_mem) return false;
+    memset(h_mem, 0xAA, 64 * 1024);
+    aether_cuda_host_free(h_mem);
+
+    /* 2. Test CUDA GEMV */
+    int rows = 4, cols = 4;
+    float W[16] = {
+        1.0f, 2.0f, 3.0f, 4.0f,
+        5.0f, 6.0f, 7.0f, 8.0f,
+        9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f
+    };
+    float x[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float y[4] = {0.0f};
+
+    void *d_W = aether_cuda_alloc(16 * sizeof(float));
+    void *d_x = aether_cuda_alloc(4 * sizeof(float));
+    void *d_y = aether_cuda_alloc(4 * sizeof(float));
+
+    aether_cuda_memcpy_h2d_async(d_W, W, 16 * sizeof(float));
+    aether_cuda_memcpy_h2d_async(d_x, x, 4 * sizeof(float));
+    aether_cuda_sync();
+
+    aether_cuda_gemv_f32((float*)d_y, (float*)d_W, (float*)d_x, rows, cols);
+    aether_cuda_memcpy_d2h_async(y, d_y, 4 * sizeof(float));
+    aether_cuda_sync();
+
+    aether_cuda_free(d_W);
+    aether_cuda_free(d_x);
+    aether_cuda_free(d_y);
+    aether_cuda_shutdown();
+
+    return (fabsf(y[0] - 10.0f) < 1e-4f && fabsf(y[1] - 26.0f) < 1e-4f &&
+            fabsf(y[2] - 42.0f) < 1e-4f && fabsf(y[3] - 58.0f) < 1e-4f);
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 9: Dynamic Auto-Tiering (Mode 1 GPU vs Mode 2 4-Tier)         */
+/* ------------------------------------------------------------------ */
+static bool test_auto_tiering_selection(void) {
+    noel_config_t cfg_small = {
+        .dim = 512,
+        .hidden_dim = 1024,
+        .n_layers = 4,
+        .n_heads = 4,
+        .vocab_size = 1000,
+        .n_experts = 1,
+        .execution_mode = NOEL_MODE_AUTO
+    };
+    aether_priority_mgr_t mgr_small;
+    /* 4.5 GB VRAM budget -> small model fits completely in VRAM */
+    aether_priority_init(&mgr_small, &cfg_small, 4ULL * 1024 * 1024 * 1024, 6ULL * 1024 * 1024 * 1024);
+    bool ok_small = (mgr_small.active_mode == NOEL_MODE_MONOLITHIC_GPU);
+    aether_priority_free(&mgr_small);
+
+    noel_config_t cfg_large = {
+        .dim = 5120,
+        .hidden_dim = 13824,
+        .n_layers = 48,
+        .n_heads = 40,
+        .vocab_size = 152064,
+        .n_experts = 8,
+        .execution_mode = NOEL_MODE_AUTO
+    };
+    aether_priority_mgr_t mgr_large;
+    /* 2.0 GB VRAM budget -> large model exceeds VRAM, must trigger 4-tier mode */
+    aether_priority_init(&mgr_large, &cfg_large, 2ULL * 1024 * 1024 * 1024, 6ULL * 1024 * 1024 * 1024);
+    bool ok_large = (mgr_large.active_mode == NOEL_MODE_HETEROGENEOUS_4TIER);
+    aether_priority_free(&mgr_large);
+
+    return ok_small && ok_large;
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("        AETHER INFERENCE ENGINE: AUTOMATED TEST HARNESS          \n");
@@ -261,6 +342,10 @@ int main(void) {
 
     printf("\n--- Hardware Acceleration Tests ---\n");
     RUN_TEST("NVIDIA RTX 4050 CUDA Driver API Runtime", test_cuda_backend);
+    RUN_TEST("Active CUDA PTX GEMV & Pinned Host Alloc", test_cuda_active_gemv);
+
+    printf("\n--- Dynamic Auto-Tiering Tests ---\n");
+    RUN_TEST("Dynamic Mode Auto-Detection (GPU vs 4-Tier)", test_auto_tiering_selection);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",

@@ -12,13 +12,23 @@ extern "C" {
 #define NOEL_ALIGNMENT 4096
 #define NOEL_BLOCK_SIZE 32
 #define NOEL_MAGIC 0x4E4F454C /* "NOEL" */
-#define NOEL_VERSION 1
+#define NOEL_VERSION 2
+#define NOEL_RELEASE "v1.1.0"
 
 /* Compatibility aliases */
 #define AETHER_ALIGNMENT NOEL_ALIGNMENT
 #define AETHER_BLOCK_SIZE NOEL_BLOCK_SIZE
 #define AETHER_MAGIC NOEL_MAGIC
 #define AETHER_VERSION NOEL_VERSION
+#define AETHER_RELEASE NOEL_RELEASE
+
+typedef enum {
+    NOEL_MODE_AUTO = 0,               /* Auto-detect based on VRAM capacity */
+    NOEL_MODE_MONOLITHIC_GPU = 1,      /* 100% VRAM execution for sub-VRAM models (0.5B-3B) */
+    NOEL_MODE_HETEROGENEOUS_4TIER = 2  /* 4-Tier HPRTA execution for out-of-core models (14B-70B) */
+} noel_execution_mode_t;
+
+typedef noel_execution_mode_t aether_execution_mode_t;
 
 typedef enum {
     NOEL_DTYPE_FP32 = 0,
@@ -53,6 +63,7 @@ typedef struct {
     float hot_ratio;         /* Ratio of hot neurons pinned in VRAM (PowerInfer) */
     float norm_eps;          /* RMSNorm epsilon */
     float rope_theta;        /* RoPE base frequency */
+    noel_execution_mode_t execution_mode; /* Dynamic auto-tiering mode */
 } noel_config_t;
 
 typedef noel_config_t aether_config_t;

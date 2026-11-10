@@ -26,7 +26,8 @@ int main(int argc, char **argv) {
         .n_active_experts = 2,    /* Top-2 active per token */
         .hot_ratio = 0.20f,       /* 20% hot neurons in VRAM (PowerInfer style) */
         .norm_eps = 1e-5f,
-        .rope_theta = 10000.0f
+        .rope_theta = 10000.0f,
+        .execution_mode = NOEL_MODE_AUTO
     };
 
     const char *prompt = "In the deep expanse of space, an autonomous starship";
@@ -43,6 +44,15 @@ int main(int argc, char **argv) {
             prompt = argv[++i];
         } else if (strcmp(argv[i], "--tokens") == 0 && i + 1 < argc) {
             max_gen_tokens = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (strcmp(m, "gpu") == 0 || strcmp(m, "vram") == 0) {
+                cfg.execution_mode = NOEL_MODE_MONOLITHIC_GPU;
+            } else if (strcmp(m, "heterogeneous") == 0 || strcmp(m, "4tier") == 0) {
+                cfg.execution_mode = NOEL_MODE_HETEROGENEOUS_4TIER;
+            } else {
+                cfg.execution_mode = NOEL_MODE_AUTO;
+            }
         }
     }
 

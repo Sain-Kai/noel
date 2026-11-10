@@ -49,7 +49,6 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
 
     /* Initialize Mock/Synthetic weights for architectural benchmarking */
     size_t q4_row_blocks = dim / AETHER_BLOCK_SIZE;
-    size_t q4_layer_bytes = dim * q4_row_blocks * sizeof(block_q4_0);
 
     engine->weights.token_embedding = (float*)calloc(cfg->vocab_size * dim, sizeof(float));
     engine->weights.attn_norm = (float*)malloc(cfg->n_layers * dim * sizeof(float));
@@ -70,7 +69,7 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     engine->weights.wo = (block_q4_0*)calloc(cfg->n_layers * dim * q4_row_blocks, sizeof(block_q4_0));
 
     for (int l = 0; l < cfg->n_layers; l++) {
-        for (int i = 0; i < dim * q4_row_blocks; i++) {
+        for (size_t i = 0; i < (size_t)(dim * q4_row_blocks); i++) {
             engine->weights.wq[l * dim * q4_row_blocks + i].scale = 0.02f;
             engine->weights.wo[l * dim * q4_row_blocks + i].scale = 0.02f;
         }
@@ -263,6 +262,12 @@ void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max
     for (int gen = 0; gen < max_gen_tokens; gen++) {
         tok = aether_engine_forward(engine, tok, pos);
         pos++;
+
+        /* Dynamic Adaptive Priority Rebalancer: Periodically re-ranks components based on EMA hits */
+        if (pos > 0 && pos % 16 == 0 && engine->priority_mgr.active_mode == NOEL_MODE_HETEROGENEOUS_4TIER) {
+            aether_priority_recompute_ranks(&engine->priority_mgr);
+            aether_priority_rebalance_tiers(&engine->priority_mgr);
+        }
 
         const char *piece = aether_tokenizer_decode(&engine->tokenizer, tok);
         printf("%s", piece);
