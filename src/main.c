@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "engine.h"
+#include "gguf_loader.h"
 
 static void print_banner(void) {
     printf("=================================================================\n");
@@ -34,6 +35,21 @@ int main(int argc, char **argv) {
     const char *prompt = "In the deep expanse of space, an autonomous starship";
     int max_gen_tokens = 32;
 
+    /* First pass: extract --model if provided to auto-configure architecture */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+            model_path = argv[++i];
+            noel_gguf_t gguf;
+            if (noel_gguf_open(&gguf, model_path)) {
+                noel_gguf_print_summary(&gguf);
+                cfg = gguf.config;
+                noel_gguf_close(&gguf);
+            }
+            break;
+        }
+    }
+
+    /* Second pass: handle overrides */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_path = argv[++i];

@@ -5,7 +5,14 @@
 #include <math.h>
 
 static int allocate_aligned_buffer(void **ptr, size_t bytes) {
-    return posix_memalign(ptr, 64, bytes);
+    int ret = posix_memalign(ptr, 64, bytes);
+    if (ret != 0 || *ptr == NULL) {
+        fprintf(stderr, "[Engine] ERROR: Failed to allocate %zu bytes buffer (ret=%d)\n", bytes, ret);
+        *ptr = NULL;
+        return ret;
+    }
+    memset(*ptr, 0, bytes);
+    return 0;
 }
 
 bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, const char *model_path) {
@@ -32,14 +39,17 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     /* 5. Allocate state buffers */
     int dim = cfg->dim;
     int hidden_dim = cfg->hidden_dim;
-    int kv_dim = (cfg->dim * cfg->n_kv_heads) / cfg->n_heads;
+    int head_dim = cfg->head_dim > 0 ? cfg->head_dim : (cfg->n_heads > 0 ? dim / cfg->n_heads : 128);
+    int kv_dim = cfg->n_kv_heads * head_dim;
+    int q_dim = cfg->n_heads * head_dim;
+    if (q_dim < dim) q_dim = dim;
 
     allocate_aligned_buffer((void**)&engine->state.x, dim * sizeof(float));
     allocate_aligned_buffer((void**)&engine->state.xb, dim * sizeof(float));
-    allocate_aligned_buffer((void**)&engine->state.xb2, dim * sizeof(float));
+    allocate_aligned_buffer((void**)&engine->state.xb2, q_dim * sizeof(float));
     allocate_aligned_buffer((void**)&engine->state.hb, hidden_dim * sizeof(float));
     allocate_aligned_buffer((void**)&engine->state.hb2, hidden_dim * sizeof(float));
-    allocate_aligned_buffer((void**)&engine->state.q, dim * sizeof(float));
+    allocate_aligned_buffer((void**)&engine->state.q, q_dim * sizeof(float));
     allocate_aligned_buffer((void**)&engine->state.k, kv_dim * sizeof(float));
     allocate_aligned_buffer((void**)&engine->state.v, kv_dim * sizeof(float));
     allocate_aligned_buffer((void**)&engine->state.att, cfg->n_heads * cfg->seq_len * sizeof(float));
@@ -98,8 +108,8 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
 
     int dim = cfg->dim;
     int hidden_dim = cfg->hidden_dim;
-    int head_dim = dim / cfg->n_heads;
-    int kv_dim = (dim * cfg->n_kv_heads) / cfg->n_heads;
+    int head_dim = cfg->head_dim > 0 ? cfg->head_dim : (cfg->n_heads > 0 ? dim / cfg->n_heads : 128);
+    int kv_dim = cfg->n_kv_heads * head_dim;
     int q4_nb = dim / AETHER_BLOCK_SIZE;
     int num_p_threads = g_cpu_topo.num_p_cores > 0 ? g_cpu_topo.num_p_cores : 6;
 
