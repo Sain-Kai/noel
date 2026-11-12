@@ -43,7 +43,7 @@ bool aether_priority_init(aether_priority_mgr_t *mgr, const aether_config_t *cfg
     mgr->components[idx].type = COMP_EMBEDDING;
     mgr->components[idx].layer_idx = -1;
     mgr->components[idx].expert_idx = -1;
-    mgr->components[idx].size_bytes = (size_t)cfg->vocab_size * dim * sizeof(float);
+    mgr->components[idx].size_bytes = (size_t)cfg->vocab_size * q4_nb * sizeof(block_q4_0);
     mgr->components[idx].priority_score = 1000.0f;
     mgr->components[idx].is_pinned = true;
     mgr->components[idx].assigned_tier = TIER_VRAM;
@@ -96,7 +96,7 @@ bool aether_priority_init(aether_priority_mgr_t *mgr, const aether_config_t *cfg
             mgr->components[idx].type = COMP_HOT_NEURONS;
             mgr->components[idx].layer_idx = l;
             mgr->components[idx].expert_idx = -1;
-            mgr->components[idx].size_bytes = expert_bytes;
+            mgr->components[idx].size_bytes = 3 * expert_bytes;
             mgr->components[idx].priority_score = 50.0f;
             mgr->components[idx].assigned_tier = TIER_RAM;
             idx++;

@@ -49,12 +49,13 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
 
     /* Initialize Mock/Synthetic weights for architectural benchmarking */
     size_t q4_row_blocks = dim / AETHER_BLOCK_SIZE;
+    size_t active_vocab = cfg->vocab_size > 32000 ? 32000 : (size_t)cfg->vocab_size;
 
-    engine->weights.token_embedding = (float*)calloc(cfg->vocab_size * dim, sizeof(float));
+    engine->weights.token_embedding = (float*)calloc(active_vocab * dim, sizeof(float));
     engine->weights.attn_norm = (float*)malloc(cfg->n_layers * dim * sizeof(float));
     engine->weights.ffn_norm = (float*)malloc(cfg->n_layers * dim * sizeof(float));
     engine->weights.final_norm = (float*)malloc(dim * sizeof(float));
-    engine->weights.lm_head = (block_q4_0*)calloc(cfg->vocab_size * q4_row_blocks, sizeof(block_q4_0));
+    engine->weights.lm_head = (block_q4_0*)calloc(active_vocab * q4_row_blocks, sizeof(block_q4_0));
 
     for (int i = 0; i < cfg->n_layers * dim; i++) {
         engine->weights.attn_norm[i] = 1.0f;
@@ -103,7 +104,9 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
     int num_p_threads = g_cpu_topo.num_p_cores > 0 ? g_cpu_topo.num_p_cores : 6;
 
     /* 1. Embedding lookup */
-    memcpy(s->x, w->token_embedding + token * dim, dim * sizeof(float));
+    size_t active_vocab = cfg->vocab_size > 32000 ? 32000 : (size_t)cfg->vocab_size;
+    int safe_token = (token >= 0 && token < (int)active_vocab) ? token : 0;
+    memcpy(s->x, w->token_embedding + safe_token * dim, dim * sizeof(float));
 
     double t_layer_start = aether_time_sec();
 

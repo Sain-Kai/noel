@@ -30,14 +30,25 @@ int main(int argc, char **argv) {
         .execution_mode = NOEL_MODE_AUTO
     };
 
+    const char *model_path = "data/weights.noel";
     const char *prompt = "In the deep expanse of space, an autonomous starship";
     int max_gen_tokens = 32;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--dim") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
+            model_path = argv[++i];
+        } else if (strcmp(argv[i], "--dim") == 0 && i + 1 < argc) {
             cfg.dim = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--hidden-dim") == 0 && i + 1 < argc) {
+            cfg.hidden_dim = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--layers") == 0 && i + 1 < argc) {
             cfg.n_layers = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--heads") == 0 && i + 1 < argc) {
+            cfg.n_heads = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--kv-heads") == 0 && i + 1 < argc) {
+            cfg.n_kv_heads = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--vocab") == 0 && i + 1 < argc) {
+            cfg.vocab_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--experts") == 0 && i + 1 < argc) {
             cfg.n_experts = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--prompt") == 0 && i + 1 < argc) {
@@ -57,7 +68,7 @@ int main(int argc, char **argv) {
     }
 
     aether_engine_t engine;
-    if (!aether_engine_init(&engine, &cfg, "data/weights.noel")) {
+    if (!aether_engine_init(&engine, &cfg, model_path)) {
         fprintf(stderr, "Failed to initialize Noel Engine\n");
         return 1;
     }
