@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <math.h>
 #include <assert.h>
 #include "aether.h"
@@ -11,6 +12,7 @@
 #include "sparsity.h"
 #include "priority.h"
 #include "pipeline_stages.h"
+#include "gguf_loader.h"
 
 #define TEST_PASS "\033[1;32m[PASS]\033[0m"
 #define TEST_FAIL "\033[1;31m[FAIL]\033[0m"
@@ -320,6 +322,33 @@ static bool test_auto_tiering_selection(void) {
     return ok_small && ok_large;
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 10: Native GGUF v3 Parsing & Zero-Copy Memory Mapping         */
+/* ------------------------------------------------------------------ */
+static bool test_gguf_loader(void) {
+    const char *path_27b = "/home/neymar-jr/.cache/huggingface/hub/models--DavidAU--Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF/snapshots/e2d64985a4a5de0ff2ba67bc8a026f9531689c75/Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-IQ4_XS.gguf";
+    const char *path_ollama = "/usr/share/ollama/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
+
+    const char *test_path = NULL;
+    if (access(path_27b, R_OK) == 0) test_path = path_27b;
+    else if (access(path_ollama, R_OK) == 0) test_path = path_ollama;
+
+    if (!test_path) return true;
+
+    noel_gguf_t ctx;
+    if (!noel_gguf_open(&ctx, test_path)) return false;
+
+    bool ok_ver = (ctx.version == 2 || ctx.version == 3);
+    bool ok_tensors = (ctx.n_tensors > 0);
+    bool ok_kv = (ctx.n_kv > 0);
+    bool ok_data = (ctx.data_offset > 0);
+    bool ok_cfg = (ctx.config.dim > 0 && ctx.config.n_layers > 0);
+    bool ok_tensor0 = (ctx.tensors != NULL && ctx.tensors[0].data != NULL && ctx.tensors[0].size_bytes > 0);
+
+    noel_gguf_close(&ctx);
+    return ok_ver && ok_tensors && ok_kv && ok_data && ok_cfg && ok_tensor0;
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("        AETHER INFERENCE ENGINE: AUTOMATED TEST HARNESS          \n");
@@ -346,6 +375,9 @@ int main(void) {
 
     printf("\n--- Dynamic Auto-Tiering Tests ---\n");
     RUN_TEST("Dynamic Mode Auto-Detection (GPU vs 4-Tier)", test_auto_tiering_selection);
+
+    printf("\n--- GGUF Zero-Copy Memory-Mapping Tests ---\n");
+    RUN_TEST("Native GGUF v3 Parsing & Memory Mapping", test_gguf_loader);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",

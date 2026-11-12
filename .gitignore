@@ -6,6 +6,7 @@ benchmark
 benchmark_cpu_offload
 generate_weights
 test_engine
+inspect_gguf
 data/*.aether
 data/*.noel
 data/*.tmp

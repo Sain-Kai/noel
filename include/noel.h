@@ -56,6 +56,7 @@ typedef struct {
     int32_t n_layers;        /* Number of transformer layers */
     int32_t n_heads;         /* Attention query heads */
     int32_t n_kv_heads;      /* Attention KV heads (for GQA) */
+    int32_t head_dim;        /* Head dimension (e.g., 64, 128, 256) */
     int32_t vocab_size;      /* Vocabulary size */
     int32_t seq_len;         /* Max context length */
     int32_t n_experts;       /* Number of experts (0 or 1 = dense model) */
