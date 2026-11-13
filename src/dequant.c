@@ -4,6 +4,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <immintrin.h>
+#include <omp.h>
 
 typedef void (*ggml_dequant_fn_t)(const void *vx, float *y, int64_t k);
 
@@ -206,8 +207,8 @@ static void dequant_row_q5_0_native(const void *src, float *dst, int64_t n) {
         for (int i = 0; i < 16; i++) {
             uint8_t x0 = (qs[i] & 0x0F) | (((qh >> (i +  0)) & 1) << 4);
             uint8_t x1 = (qs[i] >> 4)   | (((qh >> (i + 16)) & 1) << 4);
-            dst[b * 32 + i]      = (float)((int8_t)(x0) - 16) * d;
-            dst[b * 32 + i + 16] = (float)((int8_t)(x1) - 16) * d;
+            dst[b * 32 + i]      = (float)((int8_t)x0 - 16) * d;
+            dst[b * 32 + i + 16] = (float)((int8_t)x1 - 16) * d;
         }
     }
 }
@@ -265,12 +266,15 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
         case GGML_TYPE_F32:
             memcpy(dst, src, n * sizeof(float));
             break;
+
         case GGML_TYPE_BF16:
             dequant_row_bf16_native(src, dst, n);
             break;
+
         case GGML_TYPE_F16:
             dequant_row_f16_native(src, dst, n);
             break;
+
         case GGML_TYPE_Q8_0:
             if (g_dq_q8_0) {
                 g_dq_q8_0(src, dst, n);
@@ -278,6 +282,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 dequant_row_q8_0_native(src, dst, n);
             }
             break;
+
         case GGML_TYPE_Q4_0:
             if (g_dq_q4_0) {
                 g_dq_q4_0(src, dst, n);
@@ -285,6 +290,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 dequant_row_q4_0_native(src, dst, n);
             }
             break;
+
         case GGML_TYPE_Q4_1:
             if (g_dq_q4_1) {
                 g_dq_q4_1(src, dst, n);
@@ -292,6 +298,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_Q5_0:
             if (g_dq_q5_0) {
                 g_dq_q5_0(src, dst, n);
@@ -299,6 +306,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 dequant_row_q5_0_native(src, dst, n);
             }
             break;
+
         case GGML_TYPE_Q5_1:
             if (g_dq_q5_1) {
                 g_dq_q5_1(src, dst, n);
@@ -306,6 +314,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_Q2_K:
             if (g_dq_q2_k) {
                 g_dq_q2_k(src, dst, n);
@@ -313,6 +322,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_Q3_K:
             if (g_dq_q3_k) {
                 g_dq_q3_k(src, dst, n);
@@ -320,6 +330,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_Q4_K:
             if (g_dq_q4_k) {
                 g_dq_q4_k(src, dst, n);
@@ -327,6 +338,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 dequant_row_q4_k_c(src, dst, n);
             }
             break;
+
         case GGML_TYPE_Q5_K:
             if (g_dq_q5_k) {
                 g_dq_q5_k(src, dst, n);
@@ -334,6 +346,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_Q6_K:
             if (g_dq_q6_k) {
                 g_dq_q6_k(src, dst, n);
@@ -341,6 +354,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 dequant_row_q6_k_c(src, dst, n);
             }
             break;
+
         case GGML_TYPE_Q8_K:
             if (g_dq_q8_k) {
                 g_dq_q8_k(src, dst, n);
@@ -348,6 +362,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_IQ2_XXS:
             if (g_dq_iq2_xxs) {
                 g_dq_iq2_xxs(src, dst, n);
@@ -355,6 +370,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_IQ2_XS:
             if (g_dq_iq2_xs) {
                 g_dq_iq2_xs(src, dst, n);
@@ -362,6 +378,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_IQ3_XXS:
             if (g_dq_iq3_xxs) {
                 g_dq_iq3_xxs(src, dst, n);
@@ -369,6 +386,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_IQ4_XS:
             if (g_dq_iq4_xs) {
                 g_dq_iq4_xs(src, dst, n);
@@ -376,6 +394,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         case GGML_TYPE_IQ4_NL:
             if (g_dq_iq4_nl) {
                 g_dq_iq4_nl(src, dst, n);
@@ -383,6 +402,7 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
                 memset(dst, 0, n * sizeof(float));
             }
             break;
+
         default:
             memset(dst, 0, n * sizeof(float));
             break;
@@ -396,11 +416,50 @@ void noel_gemv_quantized(noel_ggml_type_t type,
                         int rows,
                         int cols,
                         int n_threads) {
-    (void)type;
-    (void)y;
-    (void)W;
-    (void)x;
-    (void)rows;
-    (void)cols;
-    (void)n_threads;
+    if (n_threads <= 0) n_threads = 6;
+    size_t row_bytes = noel_ggml_row_bytes(type, cols);
+
+    #pragma omp parallel num_threads(n_threads)
+    {
+        float *thread_buf = NULL;
+        if (cols > 8192) {
+            thread_buf = (float*)malloc(cols * sizeof(float));
+        }
+
+        #pragma omp for schedule(static)
+        for (int r = 0; r < rows; r++) {
+            const uint8_t *row_w = (const uint8_t*)W + (size_t)r * row_bytes;
+            float stack_buf[8192];
+            float *active_buf = (cols <= 8192) ? stack_buf : thread_buf;
+
+            noel_dequantize_row(type, row_w, active_buf, cols);
+
+            /* SIMD dot product using AVX2 and FMA */
+            int j = 0;
+            __m256 sum256 = _mm256_setzero_ps();
+            for (; j <= cols - 8; j += 8) {
+                __m256 vw = _mm256_loadu_ps(active_buf + j);
+                __m256 vx = _mm256_loadu_ps(x + j);
+                sum256 = _mm256_fmadd_ps(vw, vx, sum256);
+            }
+
+            /* Horizontal sum across 8 lanes */
+            __m128 hi = _mm256_extractf128_ps(sum256, 1);
+            __m128 lo = _mm256_castps256_ps128(sum256);
+            __m128 s128 = _mm_add_ps(lo, hi);
+            s128 = _mm_hadd_ps(s128, s128);
+            s128 = _mm_hadd_ps(s128, s128);
+            float dot = _mm_cvtss_f32(s128);
+
+            for (; j < cols; j++) {
+                dot += active_buf[j] * x[j];
+            }
+
+            y[r] = dot;
+        }
+
+        if (thread_buf) {
+            free(thread_buf);
+        }
+    }
 }
