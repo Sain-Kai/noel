@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <immintrin.h>
 
 int noel_ggml_block_size(noel_ggml_type_t type) {
     switch (type) {
@@ -68,11 +69,49 @@ bool noel_dequant_init(void) {
     return true;
 }
 
+/* Native AVX2 Vectorized Dequantizer: BF16 */
+static void dequant_row_bf16_native(const void *src, float *dst, int64_t n) {
+    const uint16_t *s = (const uint16_t*)src;
+    int64_t i = 0;
+    for (; i <= n - 8; i += 8) {
+        __m128i raw = _mm_loadu_si128((const __m128i*)(s + i));
+        __m256i raw32 = _mm256_slli_epi32(_mm256_cvtepu16_epi32(raw), 16);
+        _mm256_storeu_ps(dst + i, _mm256_castsi256_ps(raw32));
+    }
+    for (; i < n; i++) {
+        dst[i] = noel_bf16_to_fp32(s[i]);
+    }
+}
+
+/* Native AVX2 Vectorized Dequantizer: F16 */
+static void dequant_row_f16_native(const void *src, float *dst, int64_t n) {
+    const uint16_t *s = (const uint16_t*)src;
+    int64_t i = 0;
+    for (; i <= n - 8; i += 8) {
+        __m128i raw = _mm_loadu_si128((const __m128i*)(s + i));
+        __m256 f = _mm256_cvtph_ps(raw);
+        _mm256_storeu_ps(dst + i, f);
+    }
+    for (; i < n; i++) {
+        dst[i] = noel_fp16_to_fp32(s[i]);
+    }
+}
+
 void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int64_t n) {
-    (void)type;
-    (void)src;
-    (void)dst;
-    (void)n;
+    switch (type) {
+        case GGML_TYPE_F32:
+            memcpy(dst, src, n * sizeof(float));
+            break;
+        case GGML_TYPE_BF16:
+            dequant_row_bf16_native(src, dst, n);
+            break;
+        case GGML_TYPE_F16:
+            dequant_row_f16_native(src, dst, n);
+            break;
+        default:
+            memset(dst, 0, n * sizeof(float));
+            break;
+    }
 }
 
 void noel_gemv_quantized(noel_ggml_type_t type,
