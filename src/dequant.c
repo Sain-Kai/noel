@@ -133,6 +133,69 @@ static void dequant_row_q4_0_native(const void *src, float *dst, int64_t n) {
     }
 }
 
+/* Native Vectorized Dequantizer: Q5_0 */
+static void dequant_row_q5_0_native(const void *src, float *dst, int64_t n) {
+    const uint8_t *s = (const uint8_t*)src;
+    int64_t nb = n / 32;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t *bptr = s + b * 22;
+        float d = noel_fp16_to_fp32(*(const uint16_t*)bptr);
+        uint32_t qh = *(const uint32_t*)(bptr + 2);
+        const uint8_t *qs = bptr + 6;
+
+        for (int i = 0; i < 16; i++) {
+            uint8_t x0 = (qs[i] & 0x0F) | (((qh >> (i +  0)) & 1) << 4);
+            uint8_t x1 = (qs[i] >> 4)   | (((qh >> (i + 16)) & 1) << 4);
+            dst[b * 32 + i]      = (float)((int8_t)x0 - 16) * d;
+            dst[b * 32 + i + 16] = (float)((int8_t)x1 - 16) * d;
+        }
+    }
+}
+
+/* Pure C Fallback: Q4_K */
+static void dequant_row_q4_k_c(const void *src, float *dst, int64_t n) {
+    int64_t nb = n / 256;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t *bptr = (const uint8_t*)src + b * 144;
+        float d = noel_fp16_to_fp32(*(const uint16_t*)bptr);
+        float dmin = noel_fp16_to_fp32(*(const uint16_t*)(bptr + 2));
+        const uint8_t *scales = bptr + 4;
+        const uint8_t *qs = bptr + 16;
+        for (int j = 0; j < 8; j++) {
+            float sc = d * (float)(scales[j] & 0x3F);
+            float m = dmin * (float)(scales[j + 4] & 0x3F);
+            for (int k = 0; k < 32; k++) {
+                int idx = j * 32 + k;
+                uint8_t q = (k % 2 == 0) ? (qs[idx / 2] & 0x0F) : (qs[idx / 2] >> 4);
+                dst[b * 256 + idx] = sc * (float)q - m;
+            }
+        }
+    }
+}
+
+/* Pure C Fallback: Q6_K */
+static void dequant_row_q6_k_c(const void *src, float *dst, int64_t n) {
+    int64_t nb = n / 256;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t *bptr = (const uint8_t*)src + b * 210;
+        const uint8_t *ql = bptr;
+        const uint8_t *qh = bptr + 128;
+        const int8_t *scales = (const int8_t*)(bptr + 128 + 64);
+        float d = noel_fp16_to_fp32(*(const uint16_t*)(bptr + 128 + 64 + 16));
+
+        for (int j = 0; j < 16; j++) {
+            float sc = d * (float)scales[j];
+            for (int l = 0; l < 16; l++) {
+                int idx = j * 16 + l;
+                uint8_t low = (l % 2 == 0) ? (ql[idx / 2] & 0x0F) : (ql[idx / 2] >> 4);
+                uint8_t high = (qh[idx / 4] >> ((idx % 4) * 2)) & 0x03;
+                int8_t q = (int8_t)((high << 4) | low) - 32;
+                dst[b * 256 + idx] = sc * (float)q;
+            }
+        }
+    }
+}
+
 void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int64_t n) {
     switch (type) {
         case GGML_TYPE_F32:
@@ -149,6 +212,15 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
             break;
         case GGML_TYPE_Q4_0:
             dequant_row_q4_0_native(src, dst, n);
+            break;
+        case GGML_TYPE_Q5_0:
+            dequant_row_q5_0_native(src, dst, n);
+            break;
+        case GGML_TYPE_Q4_K:
+            dequant_row_q4_k_c(src, dst, n);
+            break;
+        case GGML_TYPE_Q6_K:
+            dequant_row_q6_k_c(src, dst, n);
             break;
         default:
             memset(dst, 0, n * sizeof(float));
