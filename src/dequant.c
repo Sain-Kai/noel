@@ -2,7 +2,30 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 #include <immintrin.h>
+
+typedef void (*ggml_dequant_fn_t)(const void *vx, float *y, int64_t k);
+
+static bool g_dequant_initialized = false;
+static void *g_ggml_lib_handle = NULL;
+
+static ggml_dequant_fn_t g_dq_q4_0    = NULL;
+static ggml_dequant_fn_t g_dq_q4_1    = NULL;
+static ggml_dequant_fn_t g_dq_q5_0    = NULL;
+static ggml_dequant_fn_t g_dq_q5_1    = NULL;
+static ggml_dequant_fn_t g_dq_q8_0    = NULL;
+static ggml_dequant_fn_t g_dq_q2_k    = NULL;
+static ggml_dequant_fn_t g_dq_q3_k    = NULL;
+static ggml_dequant_fn_t g_dq_q4_k    = NULL;
+static ggml_dequant_fn_t g_dq_q5_k    = NULL;
+static ggml_dequant_fn_t g_dq_q6_k    = NULL;
+static ggml_dequant_fn_t g_dq_q8_k    = NULL;
+static ggml_dequant_fn_t g_dq_iq2_xxs = NULL;
+static ggml_dequant_fn_t g_dq_iq2_xs  = NULL;
+static ggml_dequant_fn_t g_dq_iq3_xxs = NULL;
+static ggml_dequant_fn_t g_dq_iq4_nl  = NULL;
+static ggml_dequant_fn_t g_dq_iq4_xs  = NULL;
 
 int noel_ggml_block_size(noel_ggml_type_t type) {
     switch (type) {
@@ -66,6 +89,43 @@ size_t noel_ggml_row_bytes(noel_ggml_type_t type, int64_t n_elems) {
 }
 
 bool noel_dequant_init(void) {
+    if (g_dequant_initialized) return true;
+
+    const char *paths[] = {
+        "/usr/local/lib/ollama/libggml-base.so.0.28.0",
+        "/usr/local/lib/ollama/libggml-base.so",
+        "libggml-base.so.0",
+        "libggml-base.so",
+        NULL
+    };
+
+    for (int i = 0; paths[i]; i++) {
+        g_ggml_lib_handle = dlopen(paths[i], RTLD_NOW | RTLD_LOCAL);
+        if (g_ggml_lib_handle) {
+            break;
+        }
+    }
+
+    if (g_ggml_lib_handle) {
+        g_dq_q4_0    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q4_0");
+        g_dq_q4_1    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q4_1");
+        g_dq_q5_0    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q5_0");
+        g_dq_q5_1    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q5_1");
+        g_dq_q8_0    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q8_0");
+        g_dq_q2_k    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q2_K");
+        g_dq_q3_k    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q3_K");
+        g_dq_q4_k    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q4_K");
+        g_dq_q5_k    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q5_K");
+        g_dq_q6_k    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q6_K");
+        g_dq_q8_k    = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_q8_K");
+        g_dq_iq2_xxs = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_iq2_xxs");
+        g_dq_iq2_xs  = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_iq2_xs");
+        g_dq_iq3_xxs = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_iq3_xxs");
+        g_dq_iq4_nl  = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_iq4_nl");
+        g_dq_iq4_xs  = (ggml_dequant_fn_t)dlsym(g_ggml_lib_handle, "dequantize_row_iq4_xs");
+    }
+
+    g_dequant_initialized = true;
     return true;
 }
 
@@ -146,8 +206,8 @@ static void dequant_row_q5_0_native(const void *src, float *dst, int64_t n) {
         for (int i = 0; i < 16; i++) {
             uint8_t x0 = (qs[i] & 0x0F) | (((qh >> (i +  0)) & 1) << 4);
             uint8_t x1 = (qs[i] >> 4)   | (((qh >> (i + 16)) & 1) << 4);
-            dst[b * 32 + i]      = (float)((int8_t)x0 - 16) * d;
-            dst[b * 32 + i + 16] = (float)((int8_t)x1 - 16) * d;
+            dst[b * 32 + i]      = (float)((int8_t)(x0) - 16) * d;
+            dst[b * 32 + i + 16] = (float)((int8_t)(x1) - 16) * d;
         }
     }
 }
@@ -197,6 +257,10 @@ static void dequant_row_q6_k_c(const void *src, float *dst, int64_t n) {
 }
 
 void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int64_t n) {
+    if (!g_dequant_initialized) {
+        noel_dequant_init();
+    }
+
     switch (type) {
         case GGML_TYPE_F32:
             memcpy(dst, src, n * sizeof(float));
@@ -208,19 +272,116 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
             dequant_row_f16_native(src, dst, n);
             break;
         case GGML_TYPE_Q8_0:
-            dequant_row_q8_0_native(src, dst, n);
+            if (g_dq_q8_0) {
+                g_dq_q8_0(src, dst, n);
+            } else {
+                dequant_row_q8_0_native(src, dst, n);
+            }
             break;
         case GGML_TYPE_Q4_0:
-            dequant_row_q4_0_native(src, dst, n);
+            if (g_dq_q4_0) {
+                g_dq_q4_0(src, dst, n);
+            } else {
+                dequant_row_q4_0_native(src, dst, n);
+            }
+            break;
+        case GGML_TYPE_Q4_1:
+            if (g_dq_q4_1) {
+                g_dq_q4_1(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
             break;
         case GGML_TYPE_Q5_0:
-            dequant_row_q5_0_native(src, dst, n);
+            if (g_dq_q5_0) {
+                g_dq_q5_0(src, dst, n);
+            } else {
+                dequant_row_q5_0_native(src, dst, n);
+            }
+            break;
+        case GGML_TYPE_Q5_1:
+            if (g_dq_q5_1) {
+                g_dq_q5_1(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_Q2_K:
+            if (g_dq_q2_k) {
+                g_dq_q2_k(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_Q3_K:
+            if (g_dq_q3_k) {
+                g_dq_q3_k(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
             break;
         case GGML_TYPE_Q4_K:
-            dequant_row_q4_k_c(src, dst, n);
+            if (g_dq_q4_k) {
+                g_dq_q4_k(src, dst, n);
+            } else {
+                dequant_row_q4_k_c(src, dst, n);
+            }
+            break;
+        case GGML_TYPE_Q5_K:
+            if (g_dq_q5_k) {
+                g_dq_q5_k(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
             break;
         case GGML_TYPE_Q6_K:
-            dequant_row_q6_k_c(src, dst, n);
+            if (g_dq_q6_k) {
+                g_dq_q6_k(src, dst, n);
+            } else {
+                dequant_row_q6_k_c(src, dst, n);
+            }
+            break;
+        case GGML_TYPE_Q8_K:
+            if (g_dq_q8_k) {
+                g_dq_q8_k(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_IQ2_XXS:
+            if (g_dq_iq2_xxs) {
+                g_dq_iq2_xxs(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_IQ2_XS:
+            if (g_dq_iq2_xs) {
+                g_dq_iq2_xs(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_IQ3_XXS:
+            if (g_dq_iq3_xxs) {
+                g_dq_iq3_xxs(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_IQ4_XS:
+            if (g_dq_iq4_xs) {
+                g_dq_iq4_xs(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
+            break;
+        case GGML_TYPE_IQ4_NL:
+            if (g_dq_iq4_nl) {
+                g_dq_iq4_nl(src, dst, n);
+            } else {
+                memset(dst, 0, n * sizeof(float));
+            }
             break;
         default:
             memset(dst, 0, n * sizeof(float));
