@@ -7,7 +7,7 @@
 static void print_banner(void) {
     printf("=================================================================\n");
     printf("   NOEL INFERENCE ENGINE: HETEROGENEOUS TIERED INFERENCE         \n");
-    printf("   Optimized for Intel Raptor Lake (AVX-VNNI) + RTX 4050 + NVMe  \n");
+    printf("   Optimized for Heterogeneous CPU (AVX-VNNI) + CUDA GPU + NVMe  \n");
     printf("=================================================================\n\n");
 }
 

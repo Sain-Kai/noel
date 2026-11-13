@@ -22,7 +22,7 @@ int main(void) {
     /* ------------------------------------------------------------- */
     /* 1. Micro-benchmark: AVX2 vs AVX-VNNI GEMV Throughput on P-Cores */
     /* ------------------------------------------------------------- */
-    printf("\n[1/4] Benchmarking CPU SIMD Micro-Kernels (Intel i7-13650HX P-Cores)...\n");
+    printf("\n[1/4] Benchmarking CPU SIMD Micro-Kernels (CPU P-Cores)...\n");
     int rows = 4096;
     int cols = 4096;
     int nb = cols / AETHER_BLOCK_SIZE;
@@ -80,7 +80,7 @@ int main(void) {
     /* ------------------------------------------------------------- */
     /* 3. Micro-benchmark: NVMe SSD Read Bandwidth                   */
     /* ------------------------------------------------------------- */
-    printf("\n[3/4] Benchmarking WD SN740 NVMe Direct Read Bandwidth...\n");
+    printf("\n[3/4] Benchmarking NVMe Direct Read Bandwidth...\n");
     const char *test_path = "/home/neymar-jr/noel/data/bench_nvme.tmp";
     int fd_w = open(test_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd_w >= 0) {
@@ -105,7 +105,7 @@ int main(void) {
     /* ------------------------------------------------------------- */
     /* 4. Micro-benchmark: GPU PCIe H2D & VRAM Bandwidth            */
     /* ------------------------------------------------------------- */
-    printf("\n[4/4] Benchmarking NVIDIA RTX 4050 GPU & PCIe Gen4 Transfer...\n");
+    printf("\n[4/4] Benchmarking Dedicated GPU & PCIe Gen4 Transfer...\n");
     bool has_gpu = aether_cuda_init();
     if (has_gpu) {
         size_t gpu_bench_size = 64ULL * 1024 * 1024; /* 64 MB */

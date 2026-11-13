@@ -8,7 +8,7 @@
 int main(void) {
     printf("=================================================================\n");
     printf("  AETHER INFERENCE ENGINE: CPU AUXILIARY PIPELINE BENCHMARK      \n");
-    printf("  Testing Prerequisite & Post-Requisite Offloading on i7-13650HX \n");
+    printf("  Testing Prerequisite & Post-Requisite Offloading on CPU \n");
     printf("=================================================================\n\n");
 
     aether_detect_hardware();

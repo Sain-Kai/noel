@@ -10,9 +10,9 @@ extern "C" {
 #endif
 
 typedef enum {
-    TIER_VRAM = 0,    /* Highest bandwidth: RTX 4050 5.64 GiB @ 192 GB/s */
-    TIER_RAM  = 1,    /* Mid bandwidth: Host System RAM 10 GiB @ 50 GB/s */
-    TIER_NVME = 2     /* High capacity: WD SN740 SSD 476 GiB @ 5.23 GB/s */
+    TIER_VRAM = 0,    /* Highest bandwidth: Dedicated GPU VRAM @ 192+ GB/s */
+    TIER_RAM  = 1,    /* Mid bandwidth: Host System RAM @ ~50 GB/s */
+    TIER_NVME = 2     /* High capacity: PCIe NVMe SSD @ 5+ GB/s Direct I/O */
 } aether_tier_t;
 
 typedef enum {

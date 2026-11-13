@@ -23,7 +23,7 @@ typedef struct {
 
 extern aether_cuda_ctx_t g_cuda_ctx;
 
-/* Initialize CUDA Driver API and create context on RTX 4050 */
+/* Initialize CUDA Driver API and create context */
 bool aether_cuda_init(void);
 
 /* Allocate device memory in VRAM */
