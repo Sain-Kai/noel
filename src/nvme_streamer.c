@@ -202,6 +202,7 @@ void aether_streamer_shutdown(void) {
         pthread_mutex_unlock(&g_streamer.pipeline.lock);
 
         pthread_join(g_streamer.pipeline.worker_thread, NULL);
+        g_streamer.pipeline.worker_thread = 0;
     }
 
     for (int i = 0; i < 2; i++) {
@@ -214,14 +215,19 @@ void aether_streamer_shutdown(void) {
     for (int i = 0; i < g_streamer.lru_cache.count; i++) {
         if (g_streamer.lru_cache.entries[i].data) {
             free(g_streamer.lru_cache.entries[i].data);
+            g_streamer.lru_cache.entries[i].data = NULL;
         }
     }
     if (g_streamer.lru_cache.entries) {
         free(g_streamer.lru_cache.entries);
+        g_streamer.lru_cache.entries = NULL;
     }
 
     if (g_streamer.fd >= 0) {
         close(g_streamer.fd);
         g_streamer.fd = -1;
     }
+
+    memset(&g_streamer, 0, sizeof(g_streamer));
+    g_streamer.fd = -1;
 }

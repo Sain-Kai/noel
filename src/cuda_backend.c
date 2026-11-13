@@ -33,6 +33,7 @@ static CUresult (*fn_cuStreamCreate)(CUstream *, unsigned int) = NULL;
 static CUresult (*fn_cuStreamSynchronize)(CUstream) = NULL;
 static CUresult (*fn_cuStreamDestroy)(CUstream) = NULL;
 static CUresult (*fn_cuModuleLoadData)(CUmodule *, const void *) = NULL;
+static CUresult (*fn_cuModuleUnload)(CUmodule) = NULL;
 static CUresult (*fn_cuModuleGetFunction)(CUfunction *, CUmodule, const char *) = NULL;
 static CUresult (*fn_cuLaunchKernel)(CUfunction, unsigned int, unsigned int, unsigned int,
                                     unsigned int, unsigned int, unsigned int,
@@ -208,10 +209,20 @@ static const char *s_noel_ptx =
 "}\n";
 
 bool aether_cuda_init(void) {
-    g_cuda_ctx.cuda_handle = dlopen("libcuda.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!g_cuda_ctx.cuda_handle) {
-        printf("[CUDA] libcuda.so not found. Running in CPU-only mode.\n");
+    if (getenv("NOEL_NO_CUDA") || getenv("AETHER_NO_CUDA")) {
         return false;
+    }
+
+    if (g_cuda_ctx.initialized) {
+        return true;
+    }
+
+    if (!g_cuda_ctx.cuda_handle) {
+        g_cuda_ctx.cuda_handle = dlopen("libcuda.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!g_cuda_ctx.cuda_handle) {
+            printf("[CUDA] libcuda.so not found. Running in CPU-only mode.\n");
+            return false;
+        }
     }
 
     #define LOAD_SYM(name) \
@@ -239,6 +250,7 @@ bool aether_cuda_init(void) {
     LOAD_SYM(cuStreamSynchronize);
     LOAD_SYM(cuStreamDestroy);
     LOAD_SYM(cuModuleLoadData);
+    LOAD_SYM(cuModuleUnload);
     LOAD_SYM(cuModuleGetFunction);
     LOAD_SYM(cuLaunchKernel);
 
@@ -380,9 +392,5 @@ void aether_cuda_gemv_q4_0(float *d_y, const void *d_W, const float *d_x, int ro
 
 void aether_cuda_shutdown(void) {
     if (!g_cuda_ctx.initialized) return;
-    if (g_cuda_ctx.compute_stream) fn_cuStreamDestroy((CUstream)g_cuda_ctx.compute_stream);
-    if (g_cuda_ctx.copy_stream) fn_cuStreamDestroy((CUstream)g_cuda_ctx.copy_stream);
-    if (g_cuda_ctx.context) fn_cuCtxDestroy_v2((CUcontext)g_cuda_ctx.context);
-    if (g_cuda_ctx.cuda_handle) dlclose(g_cuda_ctx.cuda_handle);
-    memset(&g_cuda_ctx, 0, sizeof(g_cuda_ctx));
+    aether_cuda_sync();
 }

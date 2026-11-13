@@ -9,6 +9,8 @@
 #include "sparsity.h"
 #include "tokenizer.h"
 #include "priority.h"
+#include "gguf_loader.h"
+#include "dequant.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +32,40 @@ typedef struct {
     float *moe_gate;           /* n_layers x (n_experts * dim) */
     float *final_norm;         /* dim */
     block_q4_0 *lm_head;       /* vocab_size x dim */
+
+    /* Physical Zero-Copy GGUF Tensor Binding */
+    bool is_bound_gguf;
+    const void *raw_token_embd;
+    noel_ggml_type_t token_embd_type;
+    size_t token_embd_row_bytes;
+
+    const float *raw_final_norm;
+
+    const void *raw_output_weight;
+    noel_ggml_type_t output_type;
+    size_t output_row_bytes;
+
+    struct {
+        const float *attn_norm;
+        const float *ffn_norm;
+        const void *attn_q;
+        const void *attn_k;
+        const void *attn_v;
+        const void *attn_output;
+        const void *attn_qkv;
+        noel_ggml_type_t attn_q_type;
+        noel_ggml_type_t attn_k_type;
+        noel_ggml_type_t attn_v_type;
+        noel_ggml_type_t attn_out_type;
+        noel_ggml_type_t attn_qkv_type;
+
+        const void *ffn_gate;
+        const void *ffn_up;
+        const void *ffn_down;
+        noel_ggml_type_t ffn_gate_type;
+        noel_ggml_type_t ffn_up_type;
+        noel_ggml_type_t ffn_down_type;
+    } layer_tensors[128];
 } aether_weights_t;
 
 typedef struct {
@@ -55,6 +91,8 @@ typedef struct {
     aether_tokenizer_t tokenizer;
     aether_priority_mgr_t priority_mgr;
     aether_stats_t stats;
+    noel_gguf_t gguf;
+    bool is_gguf_loaded;
     bool has_gpu;
 } aether_engine_t;
 
