@@ -13,6 +13,8 @@
 #include "priority.h"
 #include "pipeline_stages.h"
 #include "gguf_loader.h"
+#include "dequant.h"
+#include "engine.h"
 
 #define TEST_PASS "\033[1;32m[PASS]\033[0m"
 #define TEST_FAIL "\033[1;31m[FAIL]\033[0m"
@@ -229,13 +231,16 @@ static bool test_prereq_pipeline(void) {
 /* Test 7: CUDA Driver Backend Initialization                        */
 /* ------------------------------------------------------------------ */
 static bool test_cuda_backend(void) {
+    if (getenv("NOEL_NO_CUDA") || getenv("AETHER_NO_CUDA")) {
+        printf("[SKIP: NOEL_NO_CUDA] ");
+        return true;
+    }
     bool ok = aether_cuda_init();
     if (ok) {
         /* Allocate 1MB on device and verify */
         void *d_mem = aether_cuda_alloc(1024 * 1024);
         if (!d_mem) return false;
         aether_cuda_free(d_mem);
-        aether_cuda_shutdown();
         return true;
     }
     return false;
@@ -245,6 +250,10 @@ static bool test_cuda_backend(void) {
 /* Test 8: Active CUDA GEMV & Pinned Host Memory Allocation           */
 /* ------------------------------------------------------------------ */
 static bool test_cuda_active_gemv(void) {
+    if (getenv("NOEL_NO_CUDA") || getenv("AETHER_NO_CUDA")) {
+        printf("[SKIP: NOEL_NO_CUDA] ");
+        return true;
+    }
     if (!aether_cuda_init()) return false;
 
     /* 1. Test Pinned Host Memory */
@@ -279,7 +288,6 @@ static bool test_cuda_active_gemv(void) {
     aether_cuda_free(d_W);
     aether_cuda_free(d_x);
     aether_cuda_free(d_y);
-    aether_cuda_shutdown();
 
     return (fabsf(y[0] - 10.0f) < 1e-4f && fabsf(y[1] - 26.0f) < 1e-4f &&
             fabsf(y[2] - 42.0f) < 1e-4f && fabsf(y[3] - 58.0f) < 1e-4f);
@@ -330,8 +338,8 @@ static bool test_gguf_loader(void) {
     const char *path_ollama = "/usr/share/ollama/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
 
     const char *test_path = NULL;
-    if (access(path_27b, R_OK) == 0) test_path = path_27b;
-    else if (access(path_ollama, R_OK) == 0) test_path = path_ollama;
+    if (access(path_ollama, R_OK) == 0) test_path = path_ollama;
+    else if (access(path_27b, R_OK) == 0) test_path = path_27b;
 
     if (!test_path) return true;
 
@@ -347,6 +355,169 @@ static bool test_gguf_loader(void) {
 
     noel_gguf_close(&ctx);
     return ok_ver && ok_tensors && ok_kv && ok_data && ok_cfg && ok_tensor0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 11: SIMD Dequantization Kernels & Mathematical Precision     */
+/* ------------------------------------------------------------------ */
+static bool test_dequantization_kernels(void) {
+    if (!noel_dequant_init()) return false;
+
+    /* 1. Test BF16 Dequantization */
+    uint16_t bf16_data[16];
+    float ref_bf16[16];
+    float dst_bf16[16];
+    for (int i = 0; i < 16; i++) {
+        ref_bf16[i] = (float)i * 0.5f + 1.25f;
+        uint32_t u;
+        memcpy(&u, &ref_bf16[i], sizeof(float));
+        bf16_data[i] = (uint16_t)(u >> 16);
+    }
+    noel_dequantize_row(GGML_TYPE_BF16, bf16_data, dst_bf16, 16);
+    for (int i = 0; i < 16; i++) {
+        if (fabsf(dst_bf16[i] - ref_bf16[i]) > 1e-2f) return false;
+    }
+
+    /* 2. Test F16 Dequantization */
+    uint16_t f16_data[8] = {
+        0x0000, /* 0.0 */
+        0x3C00, /* 1.0 */
+        0xBC00, /* -1.0 */
+        0x3800, /* 0.5 */
+        0x4000, /* 2.0 */
+        0x4248, /* 3.140625 */
+        0xB400, /* -0.25 */
+        0x4900  /* 10.0 */
+    };
+    float ref_f16[8] = {0.0f, 1.0f, -1.0f, 0.5f, 2.0f, 3.140625f, -0.25f, 10.0f};
+    float dst_f16[8];
+    noel_dequantize_row(GGML_TYPE_F16, f16_data, dst_f16, 8);
+    for (int i = 0; i < 8; i++) {
+        if (fabsf(dst_f16[i] - ref_f16[i]) > 1e-3f) return false;
+    }
+
+    /* 3. Test Q8_0 Dequantization */
+    uint8_t q8_block[34];
+    *(uint16_t*)q8_block = 0x3800; /* scale = 0.5f in fp16 */
+    int8_t *q8_qs = (int8_t*)(q8_block + 2);
+    float ref_q8[32];
+    for (int i = 0; i < 32; i++) {
+        q8_qs[i] = (int8_t)(i - 16);
+        ref_q8[i] = (float)(i - 16) * 0.5f;
+    }
+    float dst_q8[32];
+    noel_dequantize_row(GGML_TYPE_Q8_0, q8_block, dst_q8, 32);
+    for (int i = 0; i < 32; i++) {
+        if (fabsf(dst_q8[i] - ref_q8[i]) > 1e-3f) return false;
+    }
+
+    /* 4. Test Q4_0 Dequantization */
+    uint8_t q4_block[18];
+    *(uint16_t*)q4_block = 0x3800; /* scale = 0.5f */
+    uint8_t *q4_qs = q4_block + 2;
+    float ref_q4[32];
+    for (int i = 0; i < 16; i++) {
+        uint8_t low = (i & 0x0F);
+        uint8_t high = ((i + 1) & 0x0F);
+        q4_qs[i] = low | (high << 4);
+        ref_q4[i]      = (float)((int8_t)low - 8) * 0.5f;
+        ref_q4[i + 16] = (float)((int8_t)high - 8) * 0.5f;
+    }
+    float dst_q4[32];
+    noel_dequantize_row(GGML_TYPE_Q4_0, q4_block, dst_q4, 32);
+    for (int i = 0; i < 32; i++) {
+        if (fabsf(dst_q4[i] - ref_q4[i]) > 1e-3f) return false;
+    }
+
+    /* 5. Test Q5_0 Dequantization */
+    uint8_t q5_block[22];
+    *(uint16_t*)q5_block = 0x3800; /* scale = 0.5f */
+    *(uint32_t*)(q5_block + 2) = 0x55555555; /* alternating high bits */
+    uint8_t *q5_qs = q5_block + 6;
+    float ref_q5[32];
+    uint32_t qh = 0x55555555;
+    for (int i = 0; i < 16; i++) {
+        q5_qs[i] = 0x24;
+        uint8_t x0 = (0x04) | (((qh >> (i + 0)) & 1) << 4);
+        uint8_t x1 = (0x02) | (((qh >> (i + 16)) & 1) << 4);
+        ref_q5[i]      = (float)((int8_t)x0 - 16) * 0.5f;
+        ref_q5[i + 16] = (float)((int8_t)x1 - 16) * 0.5f;
+    }
+    float dst_q5[32];
+    noel_dequantize_row(GGML_TYPE_Q5_0, q5_block, dst_q5, 32);
+    for (int i = 0; i < 32; i++) {
+        if (fabsf(dst_q5[i] - ref_q5[i]) > 1e-3f) return false;
+    }
+
+    /* 6. Test Multi-Threaded GEMV with Q8_0 */
+    int rows = 16, cols = 64;
+    size_t q8_row_sz = noel_ggml_row_bytes(GGML_TYPE_Q8_0, cols);
+    uint8_t *mat_q8 = (uint8_t*)malloc(rows * q8_row_sz);
+    float *vec_x = (float*)malloc(cols * sizeof(float));
+    float *y_gemv = (float*)malloc(rows * sizeof(float));
+
+    for (int c = 0; c < cols; c++) vec_x[c] = 1.0f;
+    for (int r = 0; r < rows; r++) {
+        uint8_t *rptr = mat_q8 + r * q8_row_sz;
+        for (int b = 0; b < cols / 32; b++) {
+            uint8_t *bptr = rptr + b * 34;
+            *(uint16_t*)bptr = 0x3800; /* 0.5f */
+            int8_t *qs = (int8_t*)(bptr + 2);
+            for (int j = 0; j < 32; j++) qs[j] = 2; /* 2 * 0.5f = 1.0f */
+        }
+    }
+
+    noel_gemv_quantized(GGML_TYPE_Q8_0, y_gemv, mat_q8, vec_x, rows, cols, 4);
+
+    bool ok_gemv = true;
+    for (int r = 0; r < rows; r++) {
+        if (fabsf(y_gemv[r] - 64.0f) > 1e-3f) {
+            ok_gemv = false;
+            break;
+        }
+    }
+
+    free(mat_q8); free(vec_x); free(y_gemv);
+    return ok_gemv;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 12: Physical GGUF Tensor Binding into 4-Tier Memory Pipeline  */
+/* ------------------------------------------------------------------ */
+static bool test_physical_gguf_tensor_binding(void) {
+    const char *path_ollama = "/usr/share/ollama/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
+    const char *path_27b = "/home/neymar-jr/.cache/huggingface/hub/models--DavidAU--Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF/snapshots/e2d64985a4a5de0ff2ba67bc8a026f9531689c75/Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-IQ4_XS.gguf";
+
+    const char *test_path = NULL;
+    if (access(path_ollama, R_OK) == 0) test_path = path_ollama;
+    else if (access(path_27b, R_OK) == 0) test_path = path_27b;
+
+    if (!test_path) return true;
+
+    noel_gguf_t gguf_probe;
+    if (!noel_gguf_open(&gguf_probe, test_path)) return false;
+    noel_config_t cfg = gguf_probe.config;
+    noel_gguf_close(&gguf_probe);
+
+    aether_engine_t engine;
+    if (!aether_engine_init(&engine, &cfg, test_path)) return false;
+
+    /* Verify physical zero-copy binding */
+    bool ok_bound = engine.is_gguf_loaded && engine.weights.is_bound_gguf;
+    bool ok_embd  = (engine.weights.raw_token_embd != NULL) && (engine.weights.token_embd_row_bytes > 0);
+    bool ok_norm  = (engine.weights.raw_final_norm != NULL);
+    bool ok_head  = (engine.weights.raw_output_weight != NULL);
+    bool ok_layer0= (engine.weights.layer_tensors[0].attn_norm != NULL &&
+                     engine.weights.layer_tensors[0].attn_q != NULL &&
+                     engine.weights.layer_tensors[0].ffn_gate != NULL);
+
+    /* Run 1 token forward step on physical model tensors */
+    int32_t out_tok = aether_engine_forward(&engine, 10, 0);
+    bool ok_fwd = (out_tok >= 0 && out_tok < engine.config.vocab_size);
+
+    aether_engine_shutdown(&engine);
+
+    return ok_bound && ok_embd && ok_norm && ok_head && ok_layer0 && ok_fwd;
 }
 
 int main(void) {
@@ -378,6 +549,10 @@ int main(void) {
 
     printf("\n--- GGUF Zero-Copy Memory-Mapping Tests ---\n");
     RUN_TEST("Native GGUF v3 Parsing & Memory Mapping", test_gguf_loader);
+
+    printf("\n--- SIMD Dequantization & Physical Binding Tests ---\n");
+    RUN_TEST("Fast SIMD Dequantization Kernels & GEMV", test_dequantization_kernels);
+    RUN_TEST("Physical GGUF Tensor Binding into 4-Tier Pipeline", test_physical_gguf_tensor_binding);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",
