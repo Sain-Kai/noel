@@ -23,7 +23,7 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     aether_detect_hardware();
     aether_pin_to_p_cores();
 
-    /* 2. Initialize RTX 4050 GPU via CUDA Driver API */
+    /* 2. Initialize GPU via CUDA Driver API */
     engine->has_gpu = aether_cuda_init();
 
     /* 3. Initialize NVMe Streamer with double-buffering & LRU cache */
@@ -152,7 +152,7 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
 
         /* E. Multi-head Attention */
         if (engine->has_gpu) {
-            /* Run on RTX 4050 */
+            /* Run on CUDA GPU */
             aether_cuda_attention(s->xb2, s->q, k_cache_row, v_cache_row, pos + 1,
                                  cfg->n_heads, cfg->n_kv_heads, head_dim);
         } else {

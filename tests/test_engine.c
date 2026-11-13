@@ -226,7 +226,7 @@ static bool test_prereq_pipeline(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Test 7: CUDA Driver Backend Initialization (RTX 4050)              */
+/* Test 7: CUDA Driver Backend Initialization                        */
 /* ------------------------------------------------------------------ */
 static bool test_cuda_backend(void) {
     bool ok = aether_cuda_init();
@@ -370,7 +370,7 @@ int main(void) {
     RUN_TEST("Host RAM Embedding Lookup & RoPE Cache", test_prereq_pipeline);
 
     printf("\n--- Hardware Acceleration Tests ---\n");
-    RUN_TEST("NVIDIA RTX 4050 CUDA Driver API Runtime", test_cuda_backend);
+    RUN_TEST("NVIDIA CUDA Driver API Runtime", test_cuda_backend);
     RUN_TEST("Active CUDA PTX GEMV & Pinned Host Alloc", test_cuda_active_gemv);
 
     printf("\n--- Dynamic Auto-Tiering Tests ---\n");

@@ -43,7 +43,7 @@ static CUfunction s_fn_attention = NULL;
 static CUfunction s_fn_gemv_f32 = NULL;
 static CUfunction s_fn_gemv_q4_0 = NULL;
 
-/* sm_89 Optimized PTX Kernel Suite for Ada Lovelace RTX 4050 */
+/* sm_89 Optimized PTX Kernel Suite for Ada Lovelace Architecture */
 static const char *s_noel_ptx =
 ".version 8.0\n"
 ".target sm_89\n"

@@ -222,13 +222,13 @@ void aether_priority_print_report(const aether_priority_mgr_t *mgr) {
     printf("\n=================================================================\n");
     printf("         LAYER & COMPONENT PRIORITY PLACEMENT REPORT             \n");
     printf("=================================================================\n");
-    printf("• Tier 0 (RTX 4050 VRAM): %2d components (Allocated: %.2f / %.2f GiB)\n",
+    printf("• Tier 0 (GPU VRAM):      %2d components (Allocated: %.2f / %.2f GiB)\n",
            n_vram, (double)mgr->vram_used_bytes / (1024*1024*1024),
            (double)mgr->vram_budget_bytes / (1024*1024*1024));
-    printf("• Tier 1 (Host DDR5 RAM): %2d components (Allocated: %.2f / %.2f GiB)\n",
+    printf("• Tier 1 (Host RAM):      %2d components (Allocated: %.2f / %.2f GiB)\n",
            n_ram, (double)mgr->ram_used_bytes / (1024*1024*1024),
            (double)mgr->ram_budget_bytes / (1024*1024*1024));
-    printf("• Tier 2 (WD SN740 NVMe): %2d components (On-Demand Direct Streaming)\n", n_nvme);
+    printf("• Tier 2 (NVMe SSD):      %2d components (On-Demand Direct Streaming)\n", n_nvme);
     printf("-----------------------------------------------------------------\n");
     printf(" Rank | Component Type       | Layer | Expert | Hits | Score  | Tier \n");
     printf("-----------------------------------------------------------------\n");

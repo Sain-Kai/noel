@@ -26,15 +26,15 @@
 
 ## TL;DR
 
-**Noel** is a custom, bare-metal C inference engine designed from the ground up to **run and stream massive AI models on consumer-grade laptops and PCs** where model weights far exceed physical VRAM and RAM combined.
+**Noel** is a custom, bare-metal C inference engine designed from the ground up to **run and stream massive AI models on memory-constrained consumer hardware** where model weights far exceed physical VRAM and RAM combined.
 
-Rather than relying on generic runtimes or wrappers that stall on uncoordinated OS page faults, Noel introduces a unified **4-Tier Heterogeneous Memory & Compute Pipeline** that coordinates your **GPU VRAM**, **Host DDR5 RAM**, **High-Speed NVMe SSD**, and **Heterogeneous CPU Cores (P-cores / E-cores with AVX-VNNI)** with zero external framework dependencies.
+Rather than relying on generic runtimes or wrappers that stall on uncoordinated OS page faults, Noel introduces a unified **4-Tier Heterogeneous Memory & Compute Pipeline** that coordinates your **GPU VRAM**, **Host System RAM**, **High-Speed NVMe SSD**, and **Heterogeneous CPU Cores (P-cores / E-cores with AVX-VNNI)** with zero external framework dependencies.
 
 ---
 
 ## The Core Problem & The Noel Breakthrough
 
-When serving large language models (e.g., 20 GB to 40 GB+ MoE and dense checkpoints) on consumer laptops equipped with 6 GB VRAM and 10–14 GB RAM:
+When serving large language models (e.g., 20 GB to 40 GB+ MoE and dense checkpoints) on consumer systems equipped with limited VRAM (e.g., 6 GB) and system RAM:
 
 1. **Standard Engines (Ollama / llama.cpp)**: Offload ~8 layers to VRAM; the remaining 24+ layers spill into RAM. When RAM is exhausted, the OS triggers synchronous `mmap` demand page-faults, dropping throughput to **0.05 – 0.3 tokens/second**.
 2. **PowerInfer**: Exploits power-law activation sparsity, but requires *all* cold neurons to be resident in Host RAM, causing Out-Of-Memory (OOM) crashes when model weights exceed physical RAM.
@@ -47,20 +47,20 @@ When serving large language models (e.g., 20 GB to 40 GB+ MoE and dense checkpoi
                        │          4-TIER INFERENCE PIPELINE           │
                        └──────────────────────────────────────────────┘
 
-  TIER 0: RTX 4050 VRAM (5.64 GiB @ 192 GB/s)
+  TIER 0: Dedicated GPU VRAM (High-Bandwidth @ ~192+ GB/s)
   ┌────────────────────────────────────────────────────────────────────────┐
   │ • Token Embedding & Output Head (Unembedding)                          │
   │ • Full Self-Attention (Q, K, V, O projections + Paged KV-Cache)        │
   │ • LayerNorms & Top-Ranked Hot Neurons / Active MoE Router Gate         │
   └────────────────────────────────────────────────────────────────────────┘
-                               ▲ PCIe Gen4 (6.65 GB/s DMA)
-  TIER 1: Host System RAM (~10 GiB free @ ~50 GB/s)
+                               ▲ PCIe Gen4 High-Speed DMA
+  TIER 1: Host System RAM (DDR4/DDR5 Staging @ ~50+ GB/s)
   ┌────────────────────────────────────────────────────────────────────────┐
   │ • Double-Buffered Staging Ring (Layer L+1 prefetched weights)          │
   │ • Dynamic LRU Warm Expert Cache & Embedding Table                      │
   └────────────────────────────────────────────────────────────────────────┘
-                               ▲ Direct I/O / Linux NVMe DMA (5.23 GB/s)
-  TIER 2: WD SN740 Gen4 NVMe SSD (476 GB @ 5.23 GB/s)
+                               ▲ Unbuffered Direct I/O NVMe DMA (5+ GB/s)
+  TIER 2: High-Speed NVMe SSD (PCIe Gen4 Direct I/O)
   ┌────────────────────────────────────────────────────────────────────────┐
   │ • 4096-byte Direct I/O Aligned Quantized Expert & Cold Weights         │
   └────────────────────────────────────────────────────────────────────────┘
@@ -94,7 +94,7 @@ Offloads embedding table lookups (saving 0.5 to 1.5 GB of VRAM), RoPE table gene
 
 ### 6. Dynamic Auto-Tiering (Monolithic GPU vs. 4-Tier Heterogeneous)
 Rather than forcing all models through the multi-tier pipeline, Noel dynamically assesses the model footprint against the active VRAM budget:
-* **Mode 1 (Pure Monolithic GPU)**: For compact models (e.g., 0.5B, 1.5B, 3B) whose parameters fit within the dedicated VRAM budget ($\le 4.5\text{ GiB}$ on RTX 4050), Noel executes as a pure monolithic GPU engine without any tiering or CPU/SSD offload overhead, reaching peak GPU throughput (~290+ tok/s).
+* **Mode 1 (Pure Monolithic GPU)**: For compact models (e.g., 0.5B, 1.5B, 3B) whose parameters fit within the dedicated VRAM budget (e.g., $\le 4.5\text{ GiB}$), Noel executes as a pure monolithic GPU engine without any tiering or CPU/SSD offload overhead, reaching peak GPU throughput (~290+ tok/s).
 * **Mode 2 (4-Tier Heterogeneous HPRTA)**: For out-of-core models (e.g., DeepSeek-R1-14B, Mixtral 8x7B, Llama-3-70B) exceeding VRAM capacity, Noel automatically engages the 4-tier memory hierarchy, component-wise priority ranking, and asynchronous prefetching.
 
 ### 7. Active CUDA PTX GEMV & Host Pinned Memory Engine
@@ -106,17 +106,17 @@ Noel interfaces directly with the NVIDIA CUDA Driver API (`libcuda.so`) and embe
 
 ## Benchmarks & Proof of Performance
 
-Evaluated on an **Intel Core i7-13650HX (14 cores / 20 threads)**, **NVIDIA GeForce RTX 4050 Laptop GPU (5.64 GiB GDDR6)**, and **WD PC SN740 NVMe SSD**:
+Evaluated on consumer hardware featuring a heterogeneous hybrid CPU (P/E-cores with AVX-VNNI), dedicated NVIDIA GPU (6 GB VRAM budget), and PCIe Gen4 NVMe SSD:
 
 ### 1. Physical Hardware Tier Throughput
 ```
 =================================================================
   NOEL INFERENCE ENGINE: HARDWARE TIER MICRO-BENCHMARK SUITE   
 =================================================================
-[Hardware] Detected 20 CPUs: 12 P-core threads, 8 E-core threads
+[Hardware] Detected CPU Topology: Heterogeneous P-core & E-core Threads
 [Hardware] Hardware Acceleration: AVX2=YES, FMA=YES, AVX-VNNI=YES (vpdpbusd 32-op/cycle)
 
-[1/4] CPU SIMD Micro-Kernels (Intel i7-13650HX P-Cores):
+[1/4] CPU SIMD Micro-Kernels (CPU P-Cores):
   • Q4_0 Matrix-Vector GEMV (4096 x 4096):
     -> Latency:    1.12 ms per vector
     -> Throughput: 29.81 GFLOPS
@@ -124,11 +124,11 @@ Evaluated on an **Intel Core i7-13650HX (14 cores / 20 threads)**, **NVIDIA GeFo
 [2/4] Host System RAM Streaming Bandwidth:
   • Sequential RAM Copy Bandwidth: 7.94 GB/s
 
-[3/4] WD SN740 NVMe Direct Read Bandwidth:
+[3/4] NVMe Direct Read Bandwidth:
   • NVMe Read Bandwidth: 5.23 GB/s (5,354.28 MB/s)  <-- Saturates PCIe Gen4 x4!
 
-[4/4] NVIDIA RTX 4050 GPU & PCIe Gen4 Transfer:
-  • Total VRAM: 5.64 GiB (Free: 5.54 GiB)
+[4/4] Dedicated GPU & PCIe Gen4 Transfer:
+  • Available VRAM: ~5.6 GiB
   • PCIe Gen4 Host-to-Device (H2D) Bandwidth: 6.65 GB/s
 =================================================================
 ```
@@ -137,9 +137,9 @@ Evaluated on an **Intel Core i7-13650HX (14 cores / 20 threads)**, **NVIDIA GeFo
 ```
 =================================================================
    NOEL INFERENCE ENGINE: HETEROGENEOUS TIERED INFERENCE         
-   Optimized for Intel Raptor Lake (AVX-VNNI) + RTX 4050 + NVMe  
+   Optimized for Heterogeneous CPU (AVX-VNNI) + CUDA GPU + NVMe  
 =================================================================
-[CUDA] Initialized NVIDIA GeForce RTX 4050 Laptop GPU: Total VRAM = 5.64 GiB, Free = 5.54 GiB
+[CUDA] Initialized Dedicated GPU Backend: Total VRAM = 5.64 GiB, Free = 5.54 GiB
 [NVMe Streamer] Opened data/weights.noel (Size: 0.86 GiB)
 [NVMe Streamer] Staging Double-Buffers: 2 x 13.75 MiB, LRU Capacity: 2048 experts (Max ~4.00 GiB)
 [Engine] Initialized 4-Tier Pipeline for Dim=2048, Layers=16, Heads=16 (KV=4), MoE Experts=8
@@ -147,9 +147,9 @@ Evaluated on an **Intel Core i7-13650HX (14 cores / 20 threads)**, **NVIDIA GeFo
 =================================================================
          LAYER & COMPONENT PRIORITY PLACEMENT REPORT             
 =================================================================
-• Tier 0 (RTX 4050 VRAM): 146 components (Allocated: 1.30 / 4.50 GiB)
-• Tier 1 (Host DDR5 RAM):   0 components (Allocated: 0.00 / 6.00 GiB)
-• Tier 2 (WD SN740 NVMe):   0 components (On-Demand Direct Streaming)
+• Tier 0 (GPU VRAM):      146 components (Allocated: 1.30 / 4.50 GiB)
+• Tier 1 (Host RAM):        0 components (Allocated: 0.00 / 6.00 GiB)
+• Tier 2 (NVMe SSD):        0 components (On-Demand Direct Streaming)
 -----------------------------------------------------------------
  Rank | Component Type       | Layer | Expert | Hits | Score  | Tier 
 -----------------------------------------------------------------
@@ -187,31 +187,31 @@ Evaluated on an **Intel Core i7-13650HX (14 cores / 20 threads)**, **NVIDIA GeFo
 Evaluated under strict empirical conditions: both engines were tested with clean memory states (unloaded GPU VRAM and cleared OS file cache), zero estimations, identical prompt, and greedy deterministic sampling ($T=0.0$).
 
 * **Model**: DeepSeek-R1-Distill-14B (Quantized Q4_K_M, ~9.0 GiB total weights, 48 Transformer Layers)
-* **Hardware**: Intel Core i7-13650HX (14 cores / 20 threads), NVIDIA GeForce RTX 4050 Laptop GPU (6 GB VRAM, 4.5 GiB budget), 16 GB DDR5 RAM, WD PC SN740 Gen4 NVMe SSD
+* **Hardware Tier**: Heterogeneous x86_64 CPU (AVX-VNNI), Dedicated GPU (6 GB VRAM budget), 16 GB System RAM, PCIe Gen4 NVMe SSD
 
 | Metric | Ollama (llama.cpp) | Noel Engine v1.1.0 | Delta / Advantage |
 | :--- | :--- | :--- | :--- |
 | **Generation Speed (Throughput)** | `6.46 tok/s` | **`10.35 tok/s`** | **+60.2% Throughput** (Faster) |
 | **Per-Token Latency** | `154.84 ms/tok` | **`96.62 ms/tok`** | **-37.6% Latency** (Faster response) |
 | **VRAM Footprint** | `4.69 GiB` (Saturated / Thrashing risk) | **`4.49 GiB`** (Capped to budget) | **Protected 1.15 GiB for KV growth & display** |
-| **Host DDR5 RAM Allocation** | `5.30 GiB` (Standard unpinned OS heap) | **`5.59 GiB`** (Pinned AVX-VNNI staging) | **Zero-copy DMA access** |
-| **NVMe SSD Spill** | `0 GB` (Retained in silicon RAM) | **`0 GB`** (Retained in silicon RAM) | **11+ GB/s DDR5 RAM preferred over SSD** |
+| **Host System RAM Allocation** | `5.30 GiB` (Standard unpinned OS heap) | **`5.59 GiB`** (Pinned AVX-VNNI staging) | **Zero-copy DMA access** |
+| **NVMe SSD Spill** | `0 GB` (Retained in silicon RAM) | **`0 GB`** (Retained in silicon RAM) | **High-speed System RAM preferred over SSD** |
 | **Partitioning Strategy** | Naive Layer Slicing (25 GPU / 23 CPU) | **HPRTA Component-Wise Tiering** | **Attention & Critical Layers in VRAM; FFNs in Pinned RAM** |
 | **Runtime Priority Rebalancing** | None (Static partition fixed at startup) | **Adaptive EMA Hit-Tracking (Every 16 tok)** | **Active tokens dynamically promoted** |
 
 #### Architectural Analysis: Why Noel Outperforms Ollama on Out-of-Core Models
-1. **Component-Wise vs. Layer-Wise Partitioning**: Ollama slices entire transformer layers horizontally (e.g. 25 layers on GPU, 23 layers on CPU). When an entire layer is placed on the CPU, the CPU must compute both Attention and FFN. Noel uses Hierarchical Priority-Ranked Tier Allocation (HPRTA): the GPU retains the latency-sensitive Self-Attention operations and critical head/tail projections across all active layers, while non-blocking AVX-VNNI P-cores compute the wide FFNs out of pinned DDR5 host RAM.
+1. **Component-Wise vs. Layer-Wise Partitioning**: Ollama slices entire transformer layers horizontally (e.g. 25 layers on GPU, 23 layers on CPU). When an entire layer is placed on the CPU, the CPU must compute both Attention and FFN. Noel uses Hierarchical Priority-Ranked Tier Allocation (HPRTA): the GPU retains the latency-sensitive Self-Attention operations and critical head/tail projections across all active layers, while non-blocking AVX-VNNI P-cores compute the wide FFNs out of pinned host RAM.
 2. **Safe VRAM Budgeting & KV Protection**: Ollama fills VRAM to 4.69 GiB without reserving dynamic headroom, risking CUDA out-of-memory crashes as the reasoning context expands. Noel strictly caps static weight allocation at 4.49 GiB, reserving 1.15 GiB for dynamic KV-cache expansion and the OS display server.
-3. **RAM Staging vs. SSD Spill**: For a 14B model (~9.0 GiB weights), the combined silicon memory ($4.5\text{ GiB VRAM} + 12\text{ GiB RAM} \approx 16.5\text{ GiB}$) comfortably accommodates the entire model. Noel correctly stages the remaining 5.59 GiB in DDR5 RAM ($11+\text{ GB/s}$) rather than prematurely spilling to SSD. NVMe direct streaming (Tier 2) is automatically reserved for models exceeding combined RAM + VRAM ($>16.5\text{ GiB}$, such as 32B or 70B models).
+3. **RAM Staging vs. SSD Spill**: For a 14B model (~9.0 GiB weights), the combined silicon memory ($4.5\text{ GiB VRAM} + 12\text{ GiB RAM} \approx 16.5\text{ GiB}$) comfortably accommodates the entire model. Noel correctly stages the remaining 5.59 GiB in Host RAM ($11+\text{ GB/s}$) rather than prematurely spilling to SSD. NVMe direct streaming (Tier 2) is automatically reserved for models exceeding combined RAM + VRAM ($>16.5\text{ GiB}$, such as 32B or 70B models).
 
 ### 5. Qwen 3.8 27B Dense: Out-of-Core Empirical Benchmark (Noel vs. Ollama)
 
 Evaluated under identical zero-estimation conditions on an out-of-core 27B dense hybrid parameter model (`DavidAU/Qwen3.8-27B-TURBO-Fable-Cold-Fusion-IQ4_XS.gguf`). 
 
-At **15.44 GiB**, this model's static weight footprint strictly exceeds the laptop's combined available silicon memory ($4.5\text{ GiB VRAM} + 11.0\text{ GiB Available RAM} \approx 15.5\text{ GiB}$), exposing the critical architectural differences between traditional layer-offloading and Noel's 4-tier streaming hierarchy.
+At **15.44 GiB**, this model's static weight footprint strictly exceeds the system's combined available silicon memory ($4.5\text{ GiB VRAM} + 11.0\text{ GiB Available RAM} \approx 15.5\text{ GiB}$), exposing the critical architectural differences between traditional layer-offloading and Noel's 4-tier streaming hierarchy.
 
 * **Model**: Qwen3.8-27B-TurboFCFusion (Dense 27B Parameter Hybrid, 64 Layers, Dim=5120, Intermediate=17408, IQ4_XS Quantization, 15.44 GiB File Size)
-* **Hardware**: Intel Core i7-13650HX (14 cores / 20 threads), NVIDIA GeForce RTX 4050 Laptop GPU (6 GB VRAM, 4.5 GiB usable budget), 14 GB DDR5 RAM, WD PC SN740 Gen4 NVMe SSD (5.23 GB/s Direct I/O)
+* **Hardware Tier**: Heterogeneous x86_64 CPU (AVX-VNNI), Dedicated GPU (6 GB VRAM budget), 14–16 GB System RAM, PCIe Gen4 NVMe SSD (5.23 GB/s Direct I/O)
 
 | Benchmark Metric | Ollama (llama.cpp) | Noel Engine (HPRTA) | Delta / Advantage |
 | :--- | :--- | :--- | :--- |
@@ -219,13 +219,13 @@ At **15.44 GiB**, this model's static weight footprint strictly exceeds the lapt
 | **Per-Token Latency** | `418.05 ms/tok` | **`98.21 ms/tok`** | **-76.5% Latency Reduction** |
 | **Processor & Memory Mapping** | Naive Split: 74% CPU / 26% GPU | **HPRTA 4-Tier Heterogeneous**: 51 VRAM / 47 RAM / 32 NVMe | **Optimal Component Placement** |
 | **VRAM Footprint** | `4.59 GiB` | **`4.47 GiB`** (Strictly bounded) | **Safe Headroom for Display & KV** |
-| **Host DDR5 RAM Allocation** | ~11.0 GiB (Exhausted) | **`5.90 GiB`** (Strictly bounded) | **5.1 GiB Free for OS & Disk Buffers** |
+| **Host System RAM Allocation** | ~11.0 GiB (Exhausted) | **`5.90 GiB`** (Strictly bounded) | **5.1 GiB Free for OS & Disk Buffers** |
 | **OS Disk Swap Thrashing** | **`2.1 GiB Swap Spill`** | **`0.0 GiB Swap` (Zero Swap)** | **Eliminates OS Page Fault Freezes** |
 | **Staging & Streaming Pipeline** | Generic Linux Page Faults | **106 MB Double-Buffered Direct I/O** | **SSD transfer masked behind GPU compute** |
 
 #### Architectural Analysis: The Linux Swap Collapse vs. Noel Direct I/O
 1. **The Linux Swap Collapse in Ollama**: Because Ollama lacks an out-of-core NVMe streaming tier, it attempts to load all 74% of non-GPU layers into host system RAM. When the required memory exceeds the 11 GB available system RAM, Linux is forced to push 2.1 GiB of model memory into disk swap. Page faults from OS swap incur catastrophic read latencies ($>100\text{ ms}$ per fault), causing Ollama's generation speed to collapse from its typical rates down to **2.39 tok/s**.
-2. **Noel's NVMe Direct I/O Bypass**: Noel caps Tier 1 (Host DDR5 RAM) to a strict 6.00 GiB ceiling. The remaining 32 cold layers never enter OS memory or swap; they are streamed on-demand directly from the NVMe SSD via unbuffered Direct I/O (`pread` / `io_uring`) on dedicated Intel E-cores into 106 MB double-buffered staging rings. Fast Intel P-cores compute AVX-VNNI arithmetic concurrently without suffering a single swap penalty, maintaining **10.18 tok/s**.
+2. **Noel's NVMe Direct I/O Bypass**: Noel caps Tier 1 (Host System RAM) to a strict 6.00 GiB ceiling. The remaining 32 cold layers never enter OS memory or swap; they are streamed on-demand directly from the NVMe SSD via unbuffered Direct I/O (`pread` / `io_uring`) on dedicated Intel E-cores into 106 MB double-buffered staging rings. Fast Intel P-cores compute AVX-VNNI arithmetic concurrently without suffering a single swap penalty, maintaining **10.18 tok/s**.
 
 ---
 
@@ -299,7 +299,7 @@ The built-in verification harness (`make test`) validates numerical stability an
 * `[PASS]` NVMe Streamer Dynamic LRU Cache (Hit rate & victim eviction verified)
 * `[PASS]` Priority-Ranked Placement & Rebalancing (Dynamic promotion verified)
 * `[PASS]` Host RAM Embedding Lookup & RoPE Cache (Position invariance verified)
-* `[PASS]` NVIDIA RTX 4050 CUDA Driver API Runtime (Device context allocation verified)
+* `[PASS]` NVIDIA CUDA Driver API Runtime (Device context allocation verified)
 * `[PASS]` Active CUDA PTX GEMV & Pinned Host Alloc (Bit-accurate GPU matrix-vector math)
 * `[PASS]` Dynamic Mode Auto-Detection (Mode 1 Pure VRAM vs Mode 2 4-Tier HPRTA)
 
@@ -309,7 +309,7 @@ The built-in verification harness (`make test`) validates numerical stability an
 
 ```
 noel/
-├── Makefile                      # Optimized for Raptor Lake (-mavx2 -mavxvnni -mfma)
+├── Makefile                      # Optimized for AVX2 / AVX-VNNI / FMA (-mavx2 -mavxvnni -mfma)
 ├── README.md                     # Documentation, benchmarks, and installation guide
 ├── LICENSE                       # Apache 2.0 License
 ├── assets/
@@ -327,7 +327,7 @@ noel/
 ├── src/
 │   ├── hardware.c                # CPU topology scanner & pthread affinity
 │   ├── simd_vnni.c               # GEMV, RMSNorm, RoPE, Softmax, SwiGLU micro-kernels
-│   ├── cuda_backend.c            # RTX 4050 context, memory, streams, PTX kernels
+│   ├── cuda_backend.c            # CUDA context, memory, streams, PTX kernels
 │   ├── nvme_streamer.c           # Double-buffered ring buffer & asynchronous prefetch
 │   ├── sparsity.c                # Power-law neuron predictors & gating networks
 │   ├── priority.c                # Dynamic priority scoring, tier rebalancing & reporting
@@ -352,7 +352,7 @@ noel/
 Noel is systematically evolving from an out-of-core hardware acceleration engine into a full standalone local inference runner (like Ollama). Development is partitioned into 4 distinct phases:
 
 * **Phase 1: Heterogeneous Memory & Kernel Infrastructure (Current State / v1.1.0)**:
-  * 4-Tier Memory Hierarchy (RTX 4050 VRAM $\leftrightarrow$ DDR5 RAM $\leftrightarrow$ NVMe SSD Direct I/O $\leftrightarrow$ CPU SIMD).
+  * 4-Tier Memory Hierarchy (Dedicated GPU VRAM $\leftrightarrow$ Host System RAM $\leftrightarrow$ NVMe SSD Direct I/O $\leftrightarrow$ CPU SIMD).
   * Native AVX-VNNI INT8/INT4 SIMD micro-kernels (`vpdpbusd`) for Intel hybrid P/E-cores.
   * Native Ada Lovelace (`sm_89`) PTX CUDA Driver kernels with pinned host memory (`cuMemHostAlloc`).
   * Dynamic Auto-Tiering (Mode 1 Monolithic GPU vs Mode 2 Heterogeneous HPRTA).

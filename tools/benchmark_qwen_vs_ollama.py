@@ -119,10 +119,10 @@ def benchmark_noel():
     rope_theta = 1000000.0
 
     print("\n[Noel Architecture Placement]")
-    print(f" • Tier 0 (RTX 4050 VRAM): Attention Q/K/V/Out + Biases (168 MB pinned)")
-    print(f" • Tier 1 (Host DDR5 RAM): Token Embeddings (151,936 x 896) + RoPE Cache (544 MB)")
+    print(f" • Tier 0 (GPU VRAM):      Attention Q/K/V/Out + Biases (168 MB pinned)")
+    print(f" • Tier 1 (Host System RAM): Token Embeddings (151,936 x 896) + RoPE Cache (544 MB)")
     print(f" • Tier 2 (NVMe Direct I/O): Out-of-Core FFN Layers (SwiGLU gate/up/down)")
-    print(f" • CPU Pipeline:          Intel i7-13650HX 12 P-Cores with AVX-VNNI (vpdpbusd)")
+    print(f" • CPU Pipeline:          Heterogeneous CPU P-Cores with AVX-VNNI (vpdpbusd)")
 
     # Prepare input tokens (simple BPE token IDs for the prompt)
     # Token IDs for "Explain quantum computing in three sentences."

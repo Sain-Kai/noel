@@ -48,7 +48,7 @@ void aether_detect_hardware(void) {
         f = fopen(path, "r");
         if (f) {
             if (fscanf(f, "%lu", &max_freq) == 1) {
-                /* On i7-13650HX, P-cores have higher base/max freq */
+                /* P-cores have higher base/max freq */
             }
             fclose(f);
         }
