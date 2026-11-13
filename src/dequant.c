@@ -97,6 +97,42 @@ static void dequant_row_f16_native(const void *src, float *dst, int64_t n) {
     }
 }
 
+/* Native AVX2 Vectorized Dequantizer: Q8_0 */
+static void dequant_row_q8_0_native(const void *src, float *dst, int64_t n) {
+    const uint8_t *s = (const uint8_t*)src;
+    int64_t nb = n / 32;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t *bptr = s + b * 34;
+        float d = noel_fp16_to_fp32(*(const uint16_t*)bptr);
+        __m256 vd = _mm256_set1_ps(d);
+        const int8_t *qs = (const int8_t*)(bptr + 2);
+
+        for (int j = 0; j < 32; j += 8) {
+            __m128i q8 = _mm_loadl_epi64((const __m128i*)(qs + j));
+            __m256i q32 = _mm256_cvtepi8_epi32(q8);
+            __m256 vf = _mm256_cvtepi32_ps(q32);
+            _mm256_storeu_ps(dst + b * 32 + j, _mm256_mul_ps(vf, vd));
+        }
+    }
+}
+
+/* Native AVX2 Vectorized Dequantizer: Q4_0 */
+static void dequant_row_q4_0_native(const void *src, float *dst, int64_t n) {
+    const uint8_t *s = (const uint8_t*)src;
+    int64_t nb = n / 32;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t *bptr = s + b * 18;
+        float d = noel_fp16_to_fp32(*(const uint16_t*)bptr);
+        const uint8_t *qs = bptr + 2;
+
+        for (int i = 0; i < 16; i++) {
+            uint8_t q = qs[i];
+            dst[b * 32 + i]      = (float)((int8_t)(q & 0x0F) - 8) * d;
+            dst[b * 32 + i + 16] = (float)((int8_t)(q >> 4)   - 8) * d;
+        }
+    }
+}
+
 void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int64_t n) {
     switch (type) {
         case GGML_TYPE_F32:
@@ -107,6 +143,12 @@ void noel_dequantize_row(noel_ggml_type_t type, const void *src, float *dst, int
             break;
         case GGML_TYPE_F16:
             dequant_row_f16_native(src, dst, n);
+            break;
+        case GGML_TYPE_Q8_0:
+            dequant_row_q8_0_native(src, dst, n);
+            break;
+        case GGML_TYPE_Q4_0:
+            dequant_row_q4_0_native(src, dst, n);
             break;
         default:
             memset(dst, 0, n * sizeof(float));
