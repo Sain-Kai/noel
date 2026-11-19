@@ -11,6 +11,75 @@ static void print_banner(void) {
     printf("=================================================================\n\n");
 }
 
+static bool repl_stream_cb(int32_t token_id, const char *piece, void *user_data) {
+    (void)token_id;
+    (void)user_data;
+    if (piece && piece[0]) {
+        fputs(piece, stdout);
+        fflush(stdout);
+    }
+    return true;
+}
+
+static void run_interactive_repl(aether_engine_t *engine) {
+    printf("\n=================================================================\n");
+    printf("   NOEL INTERACTIVE CONVERSATION REPL (noel run)                 \n");
+    printf("   Model: %-22s | SeqLen: %-5d\n",
+           engine->gguf.model_name[0] ? engine->gguf.model_name : "Native GGUF",
+           engine->config.seq_len);
+    printf("   Commands: /exit (quit), /clear (reset context), /stats (info) \n");
+    printf("=================================================================\n\n");
+
+    char line[4096];
+    char formatted_prompt[4096 + 128];
+
+    while (1) {
+        printf("\033[1;36m>>> \033[0m");
+        fflush(stdout);
+
+        if (!fgets(line, sizeof(line), stdin)) {
+            printf("\n");
+            break;
+        }
+
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+            line[--len] = '\0';
+        }
+        if (len == 0) continue;
+
+        if (strcmp(line, "/exit") == 0 || strcmp(line, "/quit") == 0 || strcmp(line, "exit") == 0) {
+            printf("Exiting Noel REPL. Goodbye!\n");
+            break;
+        }
+
+        if (strcmp(line, "/clear") == 0 || strcmp(line, "/reset") == 0) {
+            aether_engine_reset_context(engine);
+            printf("\033[1;33m[Context reset to position 0]\033[0m\n\n");
+            continue;
+        }
+
+        if (strcmp(line, "/stats") == 0) {
+            printf("• Active Context Pos:  %d / %d tokens\n", engine->cur_pos, engine->config.seq_len);
+            printf("• Engine Throughput:   %.2f tokens/second\n\n", engine->stats.tokens_per_sec);
+            continue;
+        }
+
+        /* Format prompt for instruct chat if ChatML markers exist in vocabulary */
+        bool has_chatml = (aether_tokenizer_lookup(&engine->tokenizer, "<|im_start|>", 12) >= 0);
+        if (has_chatml) {
+            snprintf(formatted_prompt, sizeof(formatted_prompt),
+                     "<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", line);
+        } else {
+            snprintf(formatted_prompt, sizeof(formatted_prompt), "%s ", line);
+        }
+
+        printf("\033[1;32m");
+        aether_engine_generate_stream(engine, formatted_prompt, 128, 0.0f, 0.9f, repl_stream_cb, NULL);
+        printf("\033[0m\n\n");
+    }
+}
+
 int main(int argc, char **argv) {
     print_banner();
 
@@ -34,18 +103,32 @@ int main(int argc, char **argv) {
     const char *model_path = "data/weights.noel";
     const char *prompt = "In the deep expanse of space, an autonomous starship";
     int max_gen_tokens = 32;
+    bool is_repl = false;
 
-    /* First pass: extract --model if provided to auto-configure architecture */
+    /* Check for `noel run <model>` command */
+    if (argc >= 2 && (strcmp(argv[1], "run") == 0 || strcmp(argv[1], "chat") == 0)) {
+        is_repl = true;
+        if (argc >= 3 && argv[2][0] != '-') {
+            model_path = argv[2];
+        }
+    }
+
+    /* First pass: extract --model or positional path to auto-configure architecture */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             model_path = argv[++i];
-            noel_gguf_t gguf;
-            if (noel_gguf_open(&gguf, model_path)) {
-                noel_gguf_print_summary(&gguf);
-                cfg = gguf.config;
-                noel_gguf_close(&gguf);
-            }
             break;
+        } else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
+            is_repl = true;
+        }
+    }
+
+    if (model_path) {
+        noel_gguf_t gguf;
+        if (noel_gguf_open(&gguf, model_path)) {
+            noel_gguf_print_summary(&gguf);
+            cfg = gguf.config;
+            noel_gguf_close(&gguf);
         }
     }
 
@@ -71,6 +154,8 @@ int main(int argc, char **argv) {
             prompt = argv[++i];
         } else if (strcmp(argv[i], "--tokens") == 0 && i + 1 < argc) {
             max_gen_tokens = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
+            is_repl = true;
         } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             const char *m = argv[++i];
             if (strcmp(m, "gpu") == 0 || strcmp(m, "vram") == 0) {
@@ -89,7 +174,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    aether_engine_generate(&engine, prompt, max_gen_tokens);
+    if (is_repl) {
+        run_interactive_repl(&engine);
+    } else {
+        aether_engine_generate(&engine, prompt, max_gen_tokens);
+    }
 
     aether_engine_shutdown(&engine);
     return 0;

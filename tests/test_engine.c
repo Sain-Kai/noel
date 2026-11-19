@@ -520,6 +520,126 @@ static bool test_physical_gguf_tensor_binding(void) {
     return ok_bound && ok_embd && ok_norm && ok_head && ok_layer0 && ok_fwd;
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 13: GGUF Vocabulary Parsing & BPE Piece Detokenization        */
+/* ------------------------------------------------------------------ */
+static bool test_tokenizer_gguf_bpe(void) {
+    const char *path_ollama = "/usr/share/ollama/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
+    const char *path_27b = "/home/neymar-jr/.cache/huggingface/hub/models--DavidAU--Qwen3.8-27B-TURBO-Fable-Cold-Fusion-735-882-Heretic-Uncensored-NEO-CODER-MAX-MTP-GGUF/snapshots/e2d64985a4a5de0ff2ba67bc8a026f9531689c75/Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-IQ4_XS.gguf";
+
+    const char *test_path = NULL;
+    if (access(path_ollama, R_OK) == 0) test_path = path_ollama;
+    else if (access(path_27b, R_OK) == 0) test_path = path_27b;
+
+    aether_tokenizer_t tok;
+    memset(&tok, 0, sizeof(tok));
+
+    if (test_path) {
+        noel_gguf_t gguf;
+        if (!noel_gguf_open(&gguf, test_path)) return false;
+        bool ok_load = aether_tokenizer_load_gguf(&tok, &gguf);
+        noel_gguf_close(&gguf);
+        if (!ok_load || tok.vocab_size < 1000) {
+            aether_tokenizer_free(&tok);
+            return false;
+        }
+    } else {
+        aether_tokenizer_init(&tok, 1000);
+    }
+
+    /* 1. Test encoding */
+    int32_t tokens[64];
+    int n_tok = aether_tokenizer_encode(&tok, "Hello Noel", tokens, 64);
+    if (n_tok <= 0) {
+        aether_tokenizer_free(&tok);
+        return false;
+    }
+
+    /* 2. Test piece decoding */
+    char piece[128];
+    const char *decoded = aether_tokenizer_decode_piece(&tok, tokens[n_tok - 1], piece, sizeof(piece));
+    bool ok_decode = (decoded != NULL);
+
+    /* 3. Test BPE marker replacement */
+    char test_bpe[] = "\xc4\xa0world";
+    char out_buf[64];
+    aether_tokenizer_t mock_tok;
+    memset(&mock_tok, 0, sizeof(mock_tok));
+    mock_tok.vocab_size = 1;
+    mock_tok.vocab = (char**)calloc(1, sizeof(char*));
+    mock_tok.vocab[0] = strdup(test_bpe);
+    mock_tok.eos_id = 99;
+    mock_tok.pad_id = 99;
+
+    aether_tokenizer_decode_piece(&mock_tok, 0, out_buf, sizeof(out_buf));
+    bool ok_bpe_space = (strcmp(out_buf, " world") == 0);
+
+    aether_tokenizer_free(&mock_tok);
+    aether_tokenizer_free(&tok);
+
+    return ok_decode && ok_bpe_space;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 14: Streaming Engine Generation & Context Cache Persistence   */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    int token_count;
+    char text[1024];
+} test_stream_ctx_t;
+
+static bool test_stream_collector(int32_t token_id, const char *piece, void *user_data) {
+    (void)token_id;
+    test_stream_ctx_t *ctx = (test_stream_ctx_t*)user_data;
+    ctx->token_count++;
+    if (piece) {
+        strncat(ctx->text, piece, sizeof(ctx->text) - strlen(ctx->text) - 1);
+    }
+    return true;
+}
+
+static bool test_streaming_and_persistence(void) {
+    const char *path_ollama = "/usr/share/ollama/.ollama/models/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
+    const char *test_path = (access(path_ollama, R_OK) == 0) ? path_ollama : NULL;
+
+    noel_config_t cfg;
+    if (test_path) {
+        noel_gguf_t gguf;
+        if (!noel_gguf_open(&gguf, test_path)) return false;
+        cfg = gguf.config;
+        noel_gguf_close(&gguf);
+    } else {
+        cfg = (noel_config_t){
+            .dim = 128, .hidden_dim = 256, .n_layers = 2,
+            .n_heads = 2, .n_kv_heads = 1, .vocab_size = 100,
+            .seq_len = 256, .n_experts = 1, .n_active_experts = 1,
+            .hot_ratio = 1.0f, .norm_eps = 1e-5f, .rope_theta = 10000.0f
+        };
+    }
+
+    aether_engine_t engine;
+    if (!aether_engine_init(&engine, &cfg, test_path)) return false;
+
+    /* Turn 1: Stream 3 tokens */
+    test_stream_ctx_t ctx1 = {0};
+    int gen1 = aether_engine_generate_stream(&engine, "Hello", 3, 0.0f, 0.9f, test_stream_collector, &ctx1);
+    bool ok_gen1 = (gen1 > 0 && ctx1.token_count == gen1);
+    int pos_turn1 = engine.cur_pos;
+    bool ok_pos1 = (pos_turn1 >= gen1);
+
+    /* Turn 2: Multi-turn prompt persistence (pos should advance from pos_turn1) */
+    test_stream_ctx_t ctx2 = {0};
+    int gen2 = aether_engine_generate_stream(&engine, "World", 2, 0.0f, 0.9f, test_stream_collector, &ctx2);
+    bool ok_pos2 = (engine.cur_pos > pos_turn1);
+
+    /* Turn 3: Reset context */
+    aether_engine_reset_context(&engine);
+    bool ok_reset = (engine.cur_pos == 0);
+
+    aether_engine_shutdown(&engine);
+    return ok_gen1 && ok_pos1 && ok_pos2 && ok_reset;
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("        AETHER INFERENCE ENGINE: AUTOMATED TEST HARNESS          \n");
@@ -553,6 +673,10 @@ int main(void) {
     printf("\n--- SIMD Dequantization & Physical Binding Tests ---\n");
     RUN_TEST("Fast SIMD Dequantization Kernels & GEMV", test_dequantization_kernels);
     RUN_TEST("Physical GGUF Tensor Binding into 4-Tier Pipeline", test_physical_gguf_tensor_binding);
+
+    printf("\n--- Tokenizer & Streaming Conversational REPL Tests ---\n");
+    RUN_TEST("GGUF Embedded BPE Vocabulary & Piece Detokenizer", test_tokenizer_gguf_bpe);
+    RUN_TEST("Multi-Turn Streaming Generation & KV Cache Context", test_streaming_and_persistence);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",
