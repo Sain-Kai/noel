@@ -18,6 +18,7 @@ static int allocate_aligned_buffer(void **ptr, size_t bytes) {
 bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, const char *model_path) {
     memset(engine, 0, sizeof(*engine));
     engine->config = *cfg;
+    engine->cur_pos = 0;
 
     /* 1. Detect Intel CPU topology and pin main thread to P-cores */
     aether_detect_hardware();
@@ -370,7 +371,8 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
     }
 
     /* 4. LM Head projection */
-    int vocab_check = cfg->vocab_size < 1024 ? cfg->vocab_size : 1024;
+    int vocab_check = (getenv("NOEL_FULL_VOCAB") != NULL) ? cfg->vocab_size
+                    : (cfg->vocab_size < 8192 ? cfg->vocab_size : 8192);
     if (w->is_bound_gguf && w->raw_output_weight) {
         noel_gemv_quantized(w->output_type, s->logits, w->raw_output_weight, s->x, vocab_check, dim, num_p_threads);
     } else if (w->lm_head) {
@@ -394,46 +396,110 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
     return best_tok;
 }
 
-void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max_gen_tokens) {
-    int32_t prompt_tokens[1024];
-    int n_prompt = aether_tokenizer_encode(&engine->tokenizer, prompt, prompt_tokens, 1024);
+void aether_engine_reset_context(aether_engine_t *engine) {
+    if (!engine) return;
+    engine->cur_pos = 0;
+    size_t kv_dim = (engine->config.dim * engine->config.n_kv_heads) / engine->config.n_heads;
+    if (engine->state.key_cache) {
+        memset(engine->state.key_cache, 0, (size_t)engine->config.n_layers * engine->config.seq_len * kv_dim * sizeof(float));
+    }
+    if (engine->state.val_cache) {
+        memset(engine->state.val_cache, 0, (size_t)engine->config.n_layers * engine->config.seq_len * kv_dim * sizeof(float));
+    }
+}
 
-    printf("\n=== Generating (%d prompt tokens, max %d new tokens) ===\n", n_prompt, max_gen_tokens);
-    printf("Prompt: \"%s\"\n", prompt);
-    printf("Output: ");
-    fflush(stdout);
+int aether_engine_generate_stream(aether_engine_t *engine,
+                                  const char *prompt,
+                                  int max_gen_tokens,
+                                  float temperature,
+                                  float top_p,
+                                  aether_stream_callback_t callback,
+                                  void *user_data) {
+    (void)temperature;
+    (void)top_p;
+    if (!engine || !prompt) return 0;
 
-    int pos = 0;
+    int32_t prompt_tokens[2048];
+    int n_prompt = aether_tokenizer_encode(&engine->tokenizer, prompt, prompt_tokens, 2048);
+    if (n_prompt <= 0) return 0;
+
+    int pos = engine->cur_pos;
+    if (pos + n_prompt + max_gen_tokens >= engine->config.seq_len) {
+        /* Rolling context reset if nearing sequence limit */
+        aether_engine_reset_context(engine);
+        pos = 0;
+    }
+
+    double t_start = aether_time_sec();
     int32_t tok = prompt_tokens[0];
 
-    /* Process prompt tokens (prefill) */
-    double t_start = aether_time_sec();
-    for (; pos < n_prompt - 1; pos++) {
-        tok = aether_engine_forward(engine, prompt_tokens[pos], pos);
+    /* 1. Prompt prefill phase */
+    for (int i = 0; i < n_prompt - 1; i++) {
+        tok = aether_engine_forward(engine, prompt_tokens[i], pos);
+        pos++;
     }
-    tok = prompt_tokens[pos];
+    tok = prompt_tokens[n_prompt - 1];
 
-    /* Autoregressive generation */
+    /* 2. Autoregressive generation loop */
+    int tokens_generated = 0;
+    char piece_buf[256];
+
     for (int gen = 0; gen < max_gen_tokens; gen++) {
         tok = aether_engine_forward(engine, tok, pos);
         pos++;
+        tokens_generated++;
 
-        /* Dynamic Adaptive Priority Rebalancer: Periodically re-ranks components based on EMA hits */
+        /* Dynamic Adaptive Priority Rebalancer */
         if (pos > 0 && pos % 16 == 0 && engine->priority_mgr.active_mode == NOEL_MODE_HETEROGENEOUS_4TIER) {
             aether_priority_recompute_ranks(&engine->priority_mgr);
             aether_priority_rebalance_tiers(&engine->priority_mgr);
         }
 
-        const char *piece = aether_tokenizer_decode(&engine->tokenizer, tok);
-        printf("%s", piece);
-        fflush(stdout);
+        /* Decode clean text piece */
+        const char *piece = aether_tokenizer_decode_piece(&engine->tokenizer, tok, piece_buf, sizeof(piece_buf));
 
-        if (tok == engine->tokenizer.eos_id) break;
+        /* Deliver to stream callback */
+        if (callback) {
+            bool keep_going = callback(tok, piece, user_data);
+            if (!keep_going) break;
+        }
+
+        /* Check for EOS token */
+        if (tok == engine->tokenizer.eos_id) {
+            break;
+        }
     }
 
     double t_end = aether_time_sec();
     double total_sec = t_end - t_start;
-    engine->stats.tokens_per_sec = (double)pos / total_sec;
+    if (total_sec > 0.0) {
+        engine->stats.tokens_per_sec = (double)(n_prompt + tokens_generated) / total_sec;
+    }
+    engine->cur_pos = pos;
+
+    return tokens_generated;
+}
+
+static bool default_stdout_stream_cb(int32_t token_id, const char *piece, void *user_data) {
+    (void)token_id;
+    (void)user_data;
+    if (piece && piece[0]) {
+        fputs(piece, stdout);
+        fflush(stdout);
+    }
+    return true;
+}
+
+void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max_gen_tokens) {
+    printf("\n=== Generating Prompt ===\n");
+    printf("Prompt: \"%s\"\n", prompt);
+    printf("Output: ");
+    fflush(stdout);
+
+    double t_start = aether_time_sec();
+    int n_gen = aether_engine_generate_stream(engine, prompt, max_gen_tokens, 0.0f, 0.9f, default_stdout_stream_cb, NULL);
+    double total_sec = aether_time_sec() - t_start;
+    printf("\n");
 
     /* Recompute priorities and display placement report */
     aether_priority_recompute_ranks(&engine->priority_mgr);
@@ -441,7 +507,8 @@ void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max
     aether_priority_print_report(&engine->priority_mgr);
 
     printf("=== Performance Breakdown ===\n");
-    printf("• Total Tokens Processed: %d\n", pos);
+    printf("• Tokens Generated:       %d\n", n_gen);
+    printf("• Current Context Pos:    %d / %d\n", engine->cur_pos, engine->config.seq_len);
     printf("• Wall-Clock Time:        %.3f seconds\n", total_sec);
     printf("• Engine Throughput:      %.2f tokens/second\n", engine->stats.tokens_per_sec);
 }

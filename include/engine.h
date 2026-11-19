@@ -84,6 +84,8 @@ typedef struct {
     float *logits;             /* vocab_size */
 } aether_state_t;
 
+typedef bool (*aether_stream_callback_t)(int32_t token_id, const char *piece, void *user_data);
+
 typedef struct {
     aether_config_t config;
     aether_weights_t weights;
@@ -92,6 +94,7 @@ typedef struct {
     aether_priority_mgr_t priority_mgr;
     aether_stats_t stats;
     noel_gguf_t gguf;
+    int cur_pos;               /* Persistent position in KV cache across conversational turns */
     bool is_gguf_loaded;
     bool has_gpu;
 } aether_engine_t;
@@ -99,8 +102,20 @@ typedef struct {
 /* Initialize the full 4-tier engine */
 bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, const char *model_path);
 
+/* Reset context window and KV cache to position 0 */
+void aether_engine_reset_context(aether_engine_t *engine);
+
 /* Generate next token given previous token ID and position */
 int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos);
+
+/* Real-time streaming generation with callback and persistent KV cache */
+int aether_engine_generate_stream(aether_engine_t *engine,
+                                  const char *prompt,
+                                  int max_gen_tokens,
+                                  float temperature,
+                                  float top_p,
+                                  aether_stream_callback_t callback,
+                                  void *user_data);
 
 /* Generate a sequence of tokens from a prompt */
 void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max_gen_tokens);
