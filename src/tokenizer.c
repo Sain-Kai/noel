@@ -26,6 +26,32 @@ bool aether_tokenizer_init(aether_tokenizer_t *tok, int vocab_size) {
     return true;
 }
 
+bool aether_tokenizer_load_gguf(aether_tokenizer_t *tok, const noel_gguf_t *gguf) {
+    if (!tok || !gguf) return false;
+
+    int32_t vocab_size = 0;
+    char **tokens = NULL;
+    float *scores = NULL;
+
+    if (!noel_gguf_get_token_table(gguf, &vocab_size, &tokens, &scores)) {
+        return false;
+    }
+
+    /* Free any previous mock vocabulary */
+    aether_tokenizer_free(tok);
+
+    tok->vocab = tokens;
+    tok->scores = scores;
+    tok->vocab_size = vocab_size;
+    tok->bos_id = gguf->bos_token_id >= 0 ? gguf->bos_token_id : 1;
+    tok->eos_id = gguf->eos_token_id >= 0 ? gguf->eos_token_id : 2;
+    tok->pad_id = gguf->pad_token_id >= 0 ? gguf->pad_token_id : 0;
+
+    printf("[Tokenizer] Loaded %d embedded vocabulary tokens from GGUF (BOS=%d, EOS=%d)\n",
+           vocab_size, tok->bos_id, tok->eos_id);
+    return true;
+}
+
 int aether_tokenizer_encode(const aether_tokenizer_t *tok, const char *text, int32_t *tokens, int max_tokens) {
     int count = 0;
     if (tok->bos_id >= 0 && count < max_tokens) {

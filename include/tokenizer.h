@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include "gguf_loader.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +21,9 @@ typedef struct {
 
 /* Initialize standard LLaMA/Mistral compatible tokenizer */
 bool aether_tokenizer_init(aether_tokenizer_t *tok, int vocab_size);
+
+/* Load vocabulary directly from GGUF metadata */
+bool aether_tokenizer_load_gguf(aether_tokenizer_t *tok, const noel_gguf_t *gguf);
 
 /* Encode prompt string into token array */
 int aether_tokenizer_encode(const aether_tokenizer_t *tok, const char *text, int32_t *tokens, int max_tokens);

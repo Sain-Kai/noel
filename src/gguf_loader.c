@@ -118,6 +118,12 @@ bool noel_gguf_open(noel_gguf_t *ctx, const char *filepath) {
     }
 
     ctx->alignment = 32; /* Default GGUF alignment */
+    ctx->tokens_kv_offset = 0;
+    ctx->tokens_count = 0;
+    ctx->scores_kv_offset = 0;
+    ctx->bos_token_id = -1;
+    ctx->eos_token_id = -1;
+    ctx->pad_token_id = -1;
     ctx->kvs = (noel_gguf_kv_t*)calloc(ctx->n_kv, sizeof(noel_gguf_kv_t));
     if (!ctx->kvs) {
         noel_gguf_close(ctx);
@@ -157,10 +163,17 @@ bool noel_gguf_open(noel_gguf_t *ctx, const char *filepath) {
                 uint64_t count = *(const uint64_t*)p; p += 8;
                 ctx->kvs[i].val.u64 = count; /* Record array count */
                 if (item_type == GGUF_TYPE_STRING) {
+                    if (strcmp(ctx->kvs[i].key, "tokenizer.ggml.tokens") == 0) {
+                        ctx->tokens_kv_offset = (uint64_t)(p - (const uint8_t*)ctx->mmap_addr);
+                        ctx->tokens_count = (uint32_t)count;
+                    }
                     for (uint64_t c = 0; c < count && p < end; c++) {
                         uint64_t s_len = *(const uint64_t*)p; p += 8 + s_len;
                     }
                 } else {
+                    if (strcmp(ctx->kvs[i].key, "tokenizer.ggml.scores") == 0 && item_type == GGUF_TYPE_FLOAT32) {
+                        ctx->scores_kv_offset = (uint64_t)(p - (const uint8_t*)ctx->mmap_addr);
+                    }
                     size_t isize = gguf_type_size((noel_gguf_type_t)item_type);
                     p += count * isize;
                 }
@@ -180,6 +193,12 @@ bool noel_gguf_open(noel_gguf_t *ctx, const char *filepath) {
             snprintf(ctx->arch, sizeof(ctx->arch), "%s", ctx->kvs[i].val.str);
         } else if (strcmp(ctx->kvs[i].key, "general.name") == 0) {
             snprintf(ctx->model_name, sizeof(ctx->model_name), "%s", ctx->kvs[i].val.str);
+        } else if (strcmp(ctx->kvs[i].key, "tokenizer.ggml.bos_token_id") == 0) {
+            ctx->bos_token_id = (int32_t)ctx->kvs[i].val.u32;
+        } else if (strcmp(ctx->kvs[i].key, "tokenizer.ggml.eos_token_id") == 0) {
+            ctx->eos_token_id = (int32_t)ctx->kvs[i].val.u32;
+        } else if (strcmp(ctx->kvs[i].key, "tokenizer.ggml.padding_token_id") == 0) {
+            ctx->pad_token_id = (int32_t)ctx->kvs[i].val.u32;
         }
     }
 
@@ -395,4 +414,49 @@ void noel_gguf_print_summary(const noel_gguf_t *ctx) {
     printf(" • Mixture of Experts:%d experts (%d active per token)\n",
            ctx->config.n_experts, ctx->config.n_active_experts);
     printf("=================================================================\n");
+}
+
+bool noel_gguf_get_token_table(const noel_gguf_t *ctx, int32_t *out_vocab_size, char ***out_tokens, float **out_scores) {
+    if (!ctx || !ctx->mmap_addr || ctx->tokens_count == 0 || ctx->tokens_kv_offset == 0) {
+        return false;
+    }
+    int32_t count = (int32_t)ctx->tokens_count;
+    char **tokens = (char**)calloc(count, sizeof(char*));
+    if (!tokens) return false;
+
+    const uint8_t *p = (const uint8_t*)ctx->mmap_addr + ctx->tokens_kv_offset;
+    const uint8_t *end = (const uint8_t*)ctx->mmap_addr + ctx->file_size;
+
+    for (int32_t i = 0; i < count && p < end; i++) {
+        uint64_t slen = *(const uint64_t*)p;
+        p += 8;
+        if (p + slen > end) {
+            tokens[i] = strdup("");
+            continue;
+        }
+        char *str = (char*)malloc(slen + 1);
+        if (str) {
+            memcpy(str, p, slen);
+            str[slen] = '\0';
+            tokens[i] = str;
+        } else {
+            tokens[i] = strdup("");
+        }
+        p += slen;
+    }
+
+    if (out_scores) {
+        float *scores = (float*)calloc(count, sizeof(float));
+        if (ctx->scores_kv_offset > 0) {
+            const float *sp = (const float*)((const uint8_t*)ctx->mmap_addr + ctx->scores_kv_offset);
+            if ((const uint8_t*)sp + count * sizeof(float) <= end) {
+                memcpy(scores, sp, count * sizeof(float));
+            }
+        }
+        *out_scores = scores;
+    }
+
+    *out_tokens = tokens;
+    *out_vocab_size = count;
+    return true;
 }

@@ -62,6 +62,9 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
         engine->is_gguf_loaded = true;
         noel_dequant_init();
 
+        /* Load real embedded vocabulary from GGUF metadata */
+        aether_tokenizer_load_gguf(&engine->tokenizer, &engine->gguf);
+
         size_t sz = 0;
         noel_ggml_type_t t_type;
 
