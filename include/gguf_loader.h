@@ -106,6 +106,14 @@ typedef struct {
     char model_name[NOEL_GGUF_MAX_STR_LEN];
     noel_config_t config;    /* Auto-extracted Noel configuration */
 
+    /* Tokenizer metadata offsets */
+    uint64_t tokens_kv_offset;
+    uint32_t tokens_count;
+    uint64_t scores_kv_offset;
+    int32_t bos_token_id;
+    int32_t eos_token_id;
+    int32_t pad_token_id;
+
     /* Tensor and KV arrays */
     noel_tensor_info_t *tensors;
     noel_gguf_kv_t *kvs;
@@ -117,6 +125,9 @@ void noel_gguf_close(noel_gguf_t *ctx);
 
 /* Extract model configuration into Noel config struct */
 bool noel_gguf_extract_config(noel_gguf_t *ctx, noel_config_t *cfg);
+
+/* Extract embedded token vocabulary strings and scores */
+bool noel_gguf_get_token_table(const noel_gguf_t *ctx, int32_t *out_vocab_size, char ***out_tokens, float **out_scores);
 
 /* Fast tensor lookup */
 const noel_tensor_info_t *noel_gguf_find_tensor(const noel_gguf_t *ctx, const char *name);
