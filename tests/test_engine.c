@@ -630,7 +630,7 @@ static bool test_streaming_and_persistence(void) {
     /* Turn 2: Multi-turn prompt persistence (pos should advance from pos_turn1) */
     test_stream_ctx_t ctx2 = {0};
     int gen2 = aether_engine_generate_stream(&engine, "World", 2, 0.0f, 0.9f, test_stream_collector, &ctx2);
-    bool ok_pos2 = (engine.cur_pos > pos_turn1);
+    bool ok_pos2 = (engine.cur_pos > pos_turn1 && gen2 > 0);
 
     /* Turn 3: Reset context */
     aether_engine_reset_context(&engine);
