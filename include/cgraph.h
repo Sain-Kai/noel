@@ -15,7 +15,8 @@ extern "C" {
 
 /* Forward declarations */
 struct aether_weights_s;
-struct aether_config_s;
+struct noel_config_s;
+struct aether_state_s;
 
 typedef enum {
     NODE_EMBEDDING,
@@ -90,6 +91,30 @@ int noel_cgraph_compile(noel_cgraph_t *graph,
                         const struct noel_config_s *cfg);
 
 void noel_cgraph_print(const noel_cgraph_t *graph);
+
+/* Asynchronous & Cross-Tier Graph Execution */
+int noel_cgraph_execute_node(noel_cgraph_t *graph,
+                             int node_idx,
+                             struct aether_state_s *state,
+                             const struct aether_weights_s *weights,
+                             const struct noel_config_s *cfg,
+                             int pos,
+                             int num_threads);
+
+int noel_cgraph_execute_layer(noel_cgraph_t *graph,
+                              int layer_idx,
+                              struct aether_state_s *state,
+                              const struct aether_weights_s *weights,
+                              const struct noel_config_s *cfg,
+                              int pos,
+                              int num_threads);
+
+int noel_cgraph_execute(noel_cgraph_t *graph,
+                        struct aether_state_s *state,
+                        const struct aether_weights_s *weights,
+                        const struct noel_config_s *cfg,
+                        int pos,
+                        int num_threads);
 
 #ifdef __cplusplus
 }

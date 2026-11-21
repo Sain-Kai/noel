@@ -68,7 +68,7 @@ typedef struct aether_weights_s {
     } layer_tensors[128];
 } aether_weights_t;
 
-typedef struct {
+typedef struct aether_state_s {
     float *x;                  /* dim */
     float *xb;                 /* dim */
     float *xb2;                /* dim */

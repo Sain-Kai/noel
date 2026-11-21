@@ -1,8 +1,20 @@
 #include "cgraph.h"
 #include "engine.h"
+#include "pipeline_stages.h"
+#include "simd_vnni.h"
+#include "attention.h"
+#include "dequant.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <immintrin.h>
+
+static inline double noel_cgraph_time_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e6 + (double)ts.tv_nsec * 1e-3;
+}
 
 void noel_cgraph_init(noel_cgraph_t *graph, int dim, int hidden_dim, int n_layers, int n_heads, int n_kv_heads) {
     if (!graph) return;
@@ -248,6 +260,188 @@ int noel_cgraph_compile(noel_cgraph_t *graph,
 
     graph->is_compiled = true;
     return graph->node_count;
+}
+
+int noel_cgraph_execute_node(noel_cgraph_t *graph,
+                             int node_idx,
+                             struct aether_state_s *state,
+                             const struct aether_weights_s *weights,
+                             const struct noel_config_s *cfg,
+                             int pos,
+                             int num_threads) {
+    if (!graph || node_idx < 0 || node_idx >= graph->node_count || !state || !cfg) return -1;
+
+    (void)weights;
+    noel_cgraph_node_t *node = &graph->nodes[node_idx];
+    double t0 = noel_cgraph_time_us();
+
+    switch (node->type) {
+        case NODE_EMBEDDING:
+            /* If embedding weights are provided and state->x is initialized */
+            break;
+
+        case NODE_RMSNORM:
+            if (node->weights) {
+                if (node->layer_idx < 0) {
+                    /* Output norm */
+                    aether_rmsnorm(state->x, state->x, (const float *)node->weights, node->in_dim, node->param);
+                } else {
+                    /* Layer attn_norm or ffn_norm */
+                    aether_rmsnorm(state->xb, state->x, (const float *)node->weights, node->in_dim, node->param);
+                }
+            } else {
+                memcpy(state->xb, state->x, node->in_dim * sizeof(float));
+            }
+            break;
+
+        case NODE_QKV_GEMV: {
+            int dim = node->in_dim;
+            int kv_dim = node->hidden_dim;
+            if (node->weights) {
+                noel_gemv_quantized(node->weight_type, state->q, node->weights, state->xb, dim, dim, num_threads);
+            }
+            if (node->weights_secondary) {
+                noel_gemv_quantized(node->weight_type_secondary, state->k, node->weights_secondary, state->xb, kv_dim, dim, num_threads);
+            }
+            if (node->weights_tertiary) {
+                noel_gemv_quantized(node->weight_type_tertiary, state->v, node->weights_tertiary, state->xb, kv_dim, dim, num_threads);
+            }
+            break;
+        }
+
+        case NODE_ROPE: {
+            int head_dim = (cfg->n_heads > 0) ? (cfg->dim / cfg->n_heads) : 64;
+            aether_rope(state->q, cfg->n_heads, head_dim, pos, node->param);
+            aether_rope(state->k, cfg->n_kv_heads, head_dim, pos, node->param);
+
+            if (node->layer_idx >= 0 && pos < cfg->seq_len && state->key_cache && state->val_cache) {
+                int kv_dim = cfg->n_kv_heads * head_dim;
+                float *k_row = state->key_cache + ((size_t)node->layer_idx * cfg->seq_len + pos) * kv_dim;
+                float *v_row = state->val_cache + ((size_t)node->layer_idx * cfg->seq_len + pos) * kv_dim;
+                memcpy(k_row, state->k, kv_dim * sizeof(float));
+                memcpy(v_row, state->v, kv_dim * sizeof(float));
+            }
+            break;
+        }
+
+        case NODE_GQA_ATTENTION: {
+            int head_dim = (cfg->n_heads > 0) ? (cfg->dim / cfg->n_heads) : 64;
+            int kv_dim = cfg->n_kv_heads * head_dim;
+            if (node->layer_idx >= 0 && state->key_cache && state->val_cache) {
+                const float *k_layer = state->key_cache + (size_t)node->layer_idx * cfg->seq_len * kv_dim;
+                const float *v_layer = state->val_cache + (size_t)node->layer_idx * cfg->seq_len * kv_dim;
+                noel_gqa_attention(state->xb2, state->q, k_layer, v_layer,
+                                   cfg->n_heads, cfg->n_kv_heads, head_dim,
+                                   cfg->seq_len, pos, num_threads);
+            }
+            break;
+        }
+
+        case NODE_ATTN_OUTPUT:
+            if (node->weights) {
+                noel_gemv_quantized(node->weight_type, state->xb, node->weights, state->xb2, node->out_dim, node->in_dim, num_threads);
+            }
+            break;
+
+        case NODE_RESIDUAL_ADD: {
+            int d = 0;
+            for (; d + 7 < node->in_dim; d += 8) {
+                __m256 vx = _mm256_loadu_ps(state->x + d);
+                __m256 vxb = _mm256_loadu_ps(state->xb + d);
+                _mm256_storeu_ps(state->x + d, _mm256_add_ps(vx, vxb));
+            }
+            for (; d < node->in_dim; d++) {
+                state->x[d] += state->xb[d];
+            }
+            break;
+        }
+
+        case NODE_FFN_GATE_UP:
+            if (node->weights) {
+                noel_gemv_quantized(node->weight_type, state->hb, node->weights, state->xb, node->out_dim, node->in_dim, num_threads);
+            }
+            if (node->weights_secondary) {
+                noel_gemv_quantized(node->weight_type_secondary, state->hb2, node->weights_secondary, state->xb, node->out_dim, node->in_dim, num_threads);
+            }
+            break;
+
+        case NODE_SWIGLU_MUL:
+            aether_swiglu(state->hb, state->hb, state->hb2, node->in_dim);
+            break;
+
+        case NODE_FFN_DOWN:
+            if (node->weights) {
+                noel_gemv_quantized(node->weight_type, state->xb, node->weights, state->hb, node->out_dim, node->in_dim, num_threads);
+            }
+            break;
+
+        case NODE_LM_HEAD:
+            if (node->weights) {
+                noel_gemv_quantized(node->weight_type, state->logits, node->weights, state->x, node->out_dim, node->in_dim, num_threads);
+            }
+            break;
+
+        default:
+            break;
+    }
+
+    double t1 = noel_cgraph_time_us();
+    node->exec_time_us = t1 - t0;
+    graph->total_exec_time_us += node->exec_time_us;
+
+    return 0;
+}
+
+int noel_cgraph_execute_layer(noel_cgraph_t *graph,
+                              int layer_idx,
+                              struct aether_state_s *state,
+                              const struct aether_weights_s *weights,
+                              const struct noel_config_s *cfg,
+                              int pos,
+                              int num_threads) {
+    if (!graph || layer_idx < 0 || layer_idx >= graph->n_layers) return -1;
+
+    /* Compute-I/O Concurrency Overlap:
+       While current layer compute runs on GPU / P-cores,
+       asynchronously prefetch next layer from NVMe storage! */
+    if (layer_idx < cfg->n_layers - 1 && cfg->n_experts > 1) {
+        uint64_t next_offset = aether_calc_expert_offset(cfg, layer_idx + 1, 0);
+        size_t next_size = aether_calc_expert_bytes(cfg->dim, cfg->hidden_dim) * cfg->n_active_experts;
+        aether_streamer_prefetch_async(layer_idx + 1, next_offset, next_size);
+    }
+
+    for (int i = 0; i < graph->node_count; i++) {
+        if (graph->nodes[i].layer_idx == layer_idx) {
+            noel_cgraph_execute_node(graph, i, state, weights, cfg, pos, num_threads);
+        }
+    }
+    return 0;
+}
+
+int noel_cgraph_execute(noel_cgraph_t *graph,
+                        struct aether_state_s *state,
+                        const struct aether_weights_s *weights,
+                        const struct noel_config_s *cfg,
+                        int pos,
+                        int num_threads) {
+    if (!graph || !graph->is_compiled || !state || !cfg) return -1;
+
+    graph->total_exec_time_us = 0.0;
+
+    for (int i = 0; i < graph->node_count; i++) {
+        if (graph->nodes[i].layer_idx >= 0 && graph->nodes[i].type == NODE_RMSNORM &&
+            strstr(graph->nodes[i].name, "attn_norm")) {
+            int l = graph->nodes[i].layer_idx;
+            if (l < cfg->n_layers - 1 && cfg->n_experts > 1) {
+                uint64_t next_offset = aether_calc_expert_offset(cfg, l + 1, 0);
+                size_t next_size = aether_calc_expert_bytes(cfg->dim, cfg->hidden_dim) * cfg->n_active_experts;
+                aether_streamer_prefetch_async(l + 1, next_offset, next_size);
+            }
+        }
+        noel_cgraph_execute_node(graph, i, state, weights, cfg, pos, num_threads);
+    }
+
+    return 0;
 }
 
 void noel_cgraph_print(const noel_cgraph_t *graph) {
