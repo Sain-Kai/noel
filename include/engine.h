@@ -11,6 +11,9 @@
 #include "priority.h"
 #include "gguf_loader.h"
 #include "dequant.h"
+#include "attention.h"
+#include "sampler.h"
+#include "cgraph.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -94,6 +97,9 @@ typedef struct {
     aether_priority_mgr_t priority_mgr;
     aether_stats_t stats;
     noel_gguf_t gguf;
+    noel_sampler_t sampler;
+    noel_sampler_config_t sampler_cfg;
+    noel_cgraph_t cgraph;
     int cur_pos;               /* Persistent position in KV cache across conversational turns */
     bool is_gguf_loaded;
     bool has_gpu;
