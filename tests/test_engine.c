@@ -640,6 +640,148 @@ static bool test_streaming_and_persistence(void) {
     return ok_gen1 && ok_pos1 && ok_pos2 && ok_reset;
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 15: Vectorized Grouped-Query Attention (GQA) & Online Softmax */
+/* ------------------------------------------------------------------ */
+static bool test_gqa_attention_correctness(void) {
+    int n_heads = 4;
+    int n_kv_heads = 2;
+    int head_dim = 64;
+    int dim = n_heads * head_dim;
+    int kv_dim = n_kv_heads * head_dim;
+    int seq_len = 16;
+    int pos = 3;
+
+    float *q = (float *)malloc(dim * sizeof(float));
+    float *k_cache = (float *)calloc((size_t)seq_len * kv_dim, sizeof(float));
+    float *v_cache = (float *)calloc((size_t)seq_len * kv_dim, sizeof(float));
+    float *out = (float *)malloc(dim * sizeof(float));
+
+    for (int i = 0; i < dim; i++) q[i] = 0.1f * ((i % 5) + 1);
+
+    for (int t = 0; t <= pos; t++) {
+        for (int i = 0; i < kv_dim; i++) {
+            k_cache[t * kv_dim + i] = 0.05f * ((t + i) % 7 + 1);
+            v_cache[t * kv_dim + i] = (float)(t + 1) * 0.2f;
+        }
+    }
+
+    noel_gqa_attention(out, q, k_cache, v_cache, n_heads, n_kv_heads, head_dim, seq_len, pos, 4);
+
+    bool ok = true;
+    for (int i = 0; i < dim; i++) {
+        if (isnan(out[i]) || isinf(out[i]) || out[i] == 0.0f) {
+            ok = false;
+            break;
+        }
+    }
+
+    /* Single token (pos=0) check: attention softmax over single token equals 1.0 */
+    float *out0 = (float *)malloc(dim * sizeof(float));
+    noel_gqa_attention(out0, q, k_cache, v_cache, n_heads, n_kv_heads, head_dim, seq_len, 0, 4);
+    for (int h = 0; h < n_heads; h++) {
+        int kv_h = h / (n_heads / n_kv_heads);
+        for (int d = 0; d < head_dim; d++) {
+            float expected = v_cache[0 * kv_dim + kv_h * head_dim + d];
+            if (fabsf(out0[h * head_dim + d] - expected) > 1e-4f) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    free(q); free(k_cache); free(v_cache); free(out); free(out0);
+    return ok;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 16: Nucleus Top-P, Top-K, and Temperature Sampler Precision  */
+/* ------------------------------------------------------------------ */
+static bool test_sampler_precision(void) {
+    int vocab_size = 1000;
+    float *logits = (float *)calloc(vocab_size, sizeof(float));
+    noel_sampler_config_t cfg = {
+        .temperature = 0.0f,
+        .top_p = 0.9f,
+        .top_k = 40,
+        .repetition_penalty = 1.0f,
+        .seed = 42
+    };
+
+    noel_sampler_t sampler;
+    noel_sampler_init(&sampler, &cfg, vocab_size);
+
+    /* Test 1: Greedy argmax */
+    logits[250] = 5.0f;
+    logits[500] = 10.0f;
+    logits[750] = 2.0f;
+    int32_t chosen = noel_sampler_sample(&sampler, logits, vocab_size, NULL, 0);
+    bool ok_greedy = (chosen == 500);
+
+    /* Test 2: Repetition penalty (penalize token 500) */
+    int32_t history[1] = { 500 };
+    sampler.config.repetition_penalty = 3.0f;
+    chosen = noel_sampler_sample(&sampler, logits, vocab_size, history, 1);
+    bool ok_rep = (chosen == 250);
+
+    /* Test 3: Top-K filter constraint */
+    memset(logits, 0, vocab_size * sizeof(float));
+    logits[10] = 4.0f;
+    logits[20] = 3.0f;
+    logits[30] = 2.0f;
+    sampler.config.temperature = 0.8f;
+    sampler.config.top_k = 3;
+    sampler.config.repetition_penalty = 1.0f;
+
+    bool ok_topk = true;
+    for (int trial = 0; trial < 20; trial++) {
+        int32_t tok = noel_sampler_sample(&sampler, logits, vocab_size, NULL, 0);
+        if (tok != 10 && tok != 20 && tok != 30) {
+            ok_topk = false;
+            break;
+        }
+    }
+
+    noel_sampler_free(&sampler);
+    free(logits);
+    return ok_greedy && ok_rep && ok_topk;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 17: Native Computation Graph Compilation and Dispatcher IR   */
+/* ------------------------------------------------------------------ */
+static bool test_computation_graph_pipeline(void) {
+    noel_cgraph_t graph;
+    noel_cgraph_init(&graph, 896, 4864, 24, 14, 2);
+
+    int n0 = noel_cgraph_add_node(&graph, NODE_EMBEDDING, DISPATCH_CPU_SIMD, -1, "token_embd");
+    noel_cgraph_add_node(&graph, NODE_RMSNORM, DISPATCH_CPU_SIMD, 0, "blk.0.attn_norm");
+    noel_cgraph_add_node(&graph, NODE_QKV_GEMV, DISPATCH_CPU_SIMD, 0, "blk.0.attn_qkv");
+    noel_cgraph_add_node(&graph, NODE_ROPE, DISPATCH_CPU_SIMD, 0, "blk.0.rope");
+    noel_cgraph_add_node(&graph, NODE_GQA_ATTENTION, DISPATCH_CPU_SIMD, 0, "blk.0.gqa_attn");
+    noel_cgraph_add_node(&graph, NODE_ATTN_OUTPUT, DISPATCH_CPU_SIMD, 0, "blk.0.attn_output");
+    noel_cgraph_add_node(&graph, NODE_RESIDUAL_ADD, DISPATCH_CPU_SIMD, 0, "blk.0.attn_residual");
+    noel_cgraph_add_node(&graph, NODE_RMSNORM, DISPATCH_CPU_SIMD, 0, "blk.0.ffn_norm");
+    noel_cgraph_add_node(&graph, NODE_FFN_GATE_UP, DISPATCH_CPU_SIMD, 0, "blk.0.ffn_gate_up");
+    noel_cgraph_add_node(&graph, NODE_SWIGLU_MUL, DISPATCH_CPU_SIMD, 0, "blk.0.swiglu");
+    noel_cgraph_add_node(&graph, NODE_FFN_DOWN, DISPATCH_CPU_SIMD, 0, "blk.0.ffn_down");
+    noel_cgraph_add_node(&graph, NODE_RESIDUAL_ADD, DISPATCH_CPU_SIMD, 0, "blk.0.ffn_residual");
+    noel_cgraph_add_node(&graph, NODE_RMSNORM, DISPATCH_CPU_SIMD, -1, "output_norm");
+    int n13 = noel_cgraph_add_node(&graph, NODE_LM_HEAD, DISPATCH_CPU_SIMD, -1, "output");
+
+    graph.is_compiled = true;
+
+    bool ok_nodes = (graph.node_count == 14 && n0 == 0 && n13 == 13);
+    bool ok_val = noel_cgraph_validate(&graph);
+
+    noel_cgraph_mem_plan_t plan;
+    noel_cgraph_optimize_buffers(&graph, &plan);
+    bool ok_plan = (plan.unoptimized_bytes > plan.optimized_bytes && plan.reuse_efficiency_pct > 80.0f);
+
+    noel_cgraph_free(&graph);
+    return ok_nodes && ok_val && ok_plan;
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("        AETHER INFERENCE ENGINE: AUTOMATED TEST HARNESS          \n");
@@ -677,6 +819,11 @@ int main(void) {
     printf("\n--- Tokenizer & Streaming Conversational REPL Tests ---\n");
     RUN_TEST("GGUF Embedded BPE Vocabulary & Piece Detokenizer", test_tokenizer_gguf_bpe);
     RUN_TEST("Multi-Turn Streaming Generation & KV Cache Context", test_streaming_and_persistence);
+
+    printf("\n--- Native Computation Graph & GQA Attention Tests ---\n");
+    RUN_TEST("Vectorized Grouped-Query Attention (GQA)", test_gqa_attention_correctness);
+    RUN_TEST("Nucleus Top-P, Top-K & Temperature Sampler", test_sampler_precision);
+    RUN_TEST("Computation Graph Validation & Buffer Reuse", test_computation_graph_pipeline);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",
