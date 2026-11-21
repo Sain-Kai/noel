@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct aether_weights_s {
     float *token_embedding;    /* vocab_size x dim */
     float *attn_norm;          /* n_layers x dim */
     block_q4_0 *wq;            /* n_layers x (dim * dim) */
