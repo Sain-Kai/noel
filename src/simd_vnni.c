@@ -1,5 +1,6 @@
 #include "simd_vnni.h"
 #include "hardware.h"
+#include "pipeline_stages.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,21 +43,7 @@ void aether_rmsnorm(float *out, const float *x, const float *weight, int size, f
 }
 
 void aether_rope(float *vec, int n_heads, int head_dim, int pos, float rope_theta) {
-    for (int h = 0; h < n_heads; h++) {
-        float *head_vec = vec + h * head_dim;
-        for (int i = 0; i < head_dim / 2; i++) {
-            float freq = 1.0f / powf(rope_theta, (float)(2 * i) / (float)head_dim);
-            float angle = (float)pos * freq;
-            float cos_th = cosf(angle);
-            float sin_th = sinf(angle);
-
-            float v0 = head_vec[2 * i];
-            float v1 = head_vec[2 * i + 1];
-
-            head_vec[2 * i]     = v0 * cos_th - v1 * sin_th;
-            head_vec[2 * i + 1] = v0 * sin_th + v1 * cos_th;
-        }
-    }
+    noel_rope_extended(vec, n_heads, head_dim, pos, rope_theta, 1.0f, NOEL_ROPE_STYLE_LLAMA);
 }
 
 static inline float fast_sigmoid(float x) {

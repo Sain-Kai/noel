@@ -26,6 +26,37 @@ void aether_prereq_precompute_rope(float *cos_buf, float *sin_buf, int head_dim,
     }
 }
 
+void noel_rope_extended(float *vec, int n_heads, int head_dim, int pos,
+                        float rope_theta, float freq_scale, noel_rope_style_t style) {
+    if (!vec || n_heads <= 0 || head_dim <= 0 || head_dim % 2 != 0) return;
+    if (rope_theta <= 0.0f) rope_theta = 10000.0f;
+    if (freq_scale <= 0.0f) freq_scale = 1.0f;
+
+    int half_dim = head_dim / 2;
+
+    for (int h = 0; h < n_heads; h++) {
+        float *head_vec = vec + h * head_dim;
+        for (int i = 0; i < half_dim; i++) {
+            float freq = (1.0f / powf(rope_theta, (float)(2 * i) / (float)head_dim)) * freq_scale;
+            float angle = (float)pos * freq;
+            float cos_th = cosf(angle);
+            float sin_th = sinf(angle);
+
+            if (style == NOEL_ROPE_STYLE_NEOX) {
+                float v0 = head_vec[i];
+                float v1 = head_vec[i + half_dim];
+                head_vec[i]            = v0 * cos_th - v1 * sin_th;
+                head_vec[i + half_dim] = v0 * sin_th + v1 * cos_th;
+            } else {
+                float v0 = head_vec[2 * i];
+                float v1 = head_vec[2 * i + 1];
+                head_vec[2 * i]     = v0 * cos_th - v1 * sin_th;
+                head_vec[2 * i + 1] = v0 * sin_th + v1 * cos_th;
+            }
+        }
+    }
+}
+
 /* ------------------------------------------------------------- */
 /* POST-REQUISITE IMPLEMENTATIONS (E-Core Optimized)             */
 /* ------------------------------------------------------------- */

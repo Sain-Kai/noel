@@ -40,6 +40,16 @@ void aether_prereq_embedding_lookup(float *dst_x, const float *host_embeddings,
 void aether_prereq_precompute_rope(float *cos_buf, float *sin_buf, int head_dim,
                                    int pos, float rope_theta);
 
+/* RoPE Architecture Styles */
+typedef enum {
+    NOEL_ROPE_STYLE_LLAMA = 0, /* interleaved pairs: [2*i, 2*i+1] */
+    NOEL_ROPE_STYLE_NEOX  = 1  /* split halves: [i, i + half] */
+} noel_rope_style_t;
+
+/* Extended RoPE with frequency scaling factor and architecture-aware rotation styles */
+void noel_rope_extended(float *vec, int n_heads, int head_dim, int pos,
+                        float rope_theta, float freq_scale, noel_rope_style_t style);
+
 /* ------------------------------------------------------------- */
 /* POST-REQUISITE STAGES (Offloaded to E-cores)                  */
 /* ------------------------------------------------------------- */

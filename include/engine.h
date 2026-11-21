@@ -11,12 +11,15 @@
 #include "priority.h"
 #include "gguf_loader.h"
 #include "dequant.h"
+#include "attention.h"
+#include "sampler.h"
+#include "cgraph.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct {
+typedef struct aether_weights_s {
     float *token_embedding;    /* vocab_size x dim */
     float *attn_norm;          /* n_layers x dim */
     block_q4_0 *wq;            /* n_layers x (dim * dim) */
@@ -68,7 +71,7 @@ typedef struct {
     } layer_tensors[128];
 } aether_weights_t;
 
-typedef struct {
+typedef struct aether_state_s {
     float *x;                  /* dim */
     float *xb;                 /* dim */
     float *xb2;                /* dim */
@@ -94,6 +97,9 @@ typedef struct {
     aether_priority_mgr_t priority_mgr;
     aether_stats_t stats;
     noel_gguf_t gguf;
+    noel_sampler_t sampler;
+    noel_sampler_config_t sampler_cfg;
+    noel_cgraph_t cgraph;
     int cur_pos;               /* Persistent position in KV cache across conversational turns */
     bool is_gguf_loaded;
     bool has_gpu;

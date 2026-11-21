@@ -50,7 +50,7 @@ typedef struct {
     uint8_t qs[NOEL_BLOCK_SIZE / 2]; /* 16 bytes for 32 4-bit nibbles */
 } block_q4_0;
 
-typedef struct {
+typedef struct noel_config_s {
     int32_t dim;             /* Hidden size (e.g., 4096) */
     int32_t hidden_dim;      /* Intermediate MLP size (e.g., 11008 or 14336) */
     int32_t n_layers;        /* Number of transformer layers */

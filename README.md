@@ -8,7 +8,7 @@
   <a href="#benchmarks"><img src="https://img.shields.io/badge/27b--throughput-10.18%20tok%2Fs%20(4.26x%20vs%20Ollama)-brightgreen.svg" alt="27B Throughput"></a>
   <a href="#benchmarks"><img src="https://img.shields.io/badge/deepseek--14b-10.35%20tok%2Fs%20(+60%25%20vs%20Ollama)-brightgreen.svg" alt="DeepSeek 14B Throughput"></a>
   <a href="#benchmarks"><img src="https://img.shields.io/badge/nvme%20read-7.22%20GB%2Fs-orange.svg" alt="NVMe Read Speed"></a>
-  <a href="#test-results"><img src="https://img.shields.io/badge/tests-9%2F9%20passed%20(100%25)-success.svg" alt="Tests 9/9 Passed"></a>
+  <a href="#test-results"><img src="https://img.shields.io/badge/tests-17%2F17%20passed%20(100%25)-success.svg" alt="Tests 17/17 Passed"></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/architecture-Dynamic%20Auto--Tiering-purple.svg" alt="Architecture: Dynamic Auto-Tiering"></a>
 </p>
 
@@ -281,17 +281,35 @@ make test
 | Flag | Description | Default |
 | :--- | :--- | :--- |
 | `--tokens <N>` | Number of tokens to generate | `32` |
+| `--temp <float>` | Sampling temperature (`0.0` = greedy argmax) | `0.0` |
+| `--top-p <float>` | Nucleus sampling probability cutoff (`0.0 - 1.0`) | `0.9` |
+| `--top-k <int>` | Top-K candidate limit (`0` = disabled) | `40` |
+| `--rep-penalty <float>`| Repetition penalty on active vocabulary | `1.1` |
+| `--graph` | Print compiled Computation Graph IR & buffer plan | Disabled |
 | `--prompt "<text>"` | Input text prompt | Sample prompt |
 | `--dim <N>` | Model hidden dimension | `2048` |
 | `--layers <N>` | Number of transformer layers | `16` |
 | `--experts <N>` | Number of MoE experts per layer | `8` |
 | `--mode <auto\|gpu\|heterogeneous>` | Execution mode (Auto, Monolithic GPU, or 4-Tier Heterogeneous) | `auto` |
 
+### Interactive REPL Commands (`noel run`)
+| Slash Command | Function |
+| :--- | :--- |
+| `/temp <float>` | Dynamically update sampling temperature |
+| `/top_p <float>` | Dynamically update nucleus Top-P cutoff threshold |
+| `/top_k <int>` | Dynamically update Top-K candidate filtering limit |
+| `/rep <float>` | Dynamically update repetition penalty |
+| `/params` | Print active runtime sampling parameters |
+| `/graph` | Display compiled Noel Computation Graph IR topology & buffer reuse plan |
+| `/stats` | Display active context position and generation throughput |
+| `/clear` | Reset conversational context window and KV cache to position 0 |
+| `/exit` | Exit the interactive REPL shell |
+
 ---
 
 ## Automated Test Results
 
-The built-in verification harness (`make test`) validates numerical stability and kernel accuracy across 9 automated suites:
+The built-in verification harness (`make test`) validates numerical stability and kernel accuracy across 17 automated suites:
 
 * `[PASS]` AVX-VNNI Q4_0 Matrix-Vector Dot Product (Verified against scalar float)
 * `[PASS]` Vectorized RMSNorm Normalization (EPS stability verified)
@@ -302,6 +320,14 @@ The built-in verification harness (`make test`) validates numerical stability an
 * `[PASS]` NVIDIA CUDA Driver API Runtime (Device context allocation verified)
 * `[PASS]` Active CUDA PTX GEMV & Pinned Host Alloc (Bit-accurate GPU matrix-vector math)
 * `[PASS]` Dynamic Mode Auto-Detection (Mode 1 Pure VRAM vs Mode 2 4-Tier HPRTA)
+* `[PASS]` Native GGUF v3 Parsing & Memory Mapping (Header, metadata, tensor directory)
+* `[PASS]` Fast SIMD Dequantization Kernels & GEMV (Q4_0, Q4_K, Q8_0, IQ4_XS)
+* `[PASS]` Physical GGUF Tensor Binding into 4-Tier Pipeline (Zero-copy page cache mapping)
+* `[PASS]` GGUF Embedded BPE Vocabulary & Piece Detokenizer (Special tokens & byte fallbacks)
+* `[PASS]` Multi-Turn Streaming Generation & KV Cache Context (Persistence & reset)
+* `[PASS]` Vectorized Grouped-Query Attention (GQA) & Online Softmax (Group ratio & running max)
+* `[PASS]` Nucleus Top-P, Top-K & Temperature Sampler (Greedy, penalties & truncation)
+* `[PASS]` Computation Graph Validation & Buffer Reuse (>80% intermediate memory saved)
 
 ---
 
@@ -323,7 +349,12 @@ noel/
 │   ├── sparsity.h                # PowerInfer neuron partitioning & MoE top-k router
 │   ├── priority.h                # Hierarchical Priority-Ranked Tier Allocation (HPRTA)
 │   ├── pipeline_stages.h         # CPU prerequisite embeddings & post-requisite sampling
-│   └── tokenizer.h               # Fast BPE tokenizer
+│   ├── tokenizer.h               # Fast BPE tokenizer & piece detokenizer
+│   ├── gguf_loader.h             # Native GGUF v3 parser & physical memory-mapping
+│   ├── dequant.h                 # SIMD dequantization kernels (Q4_0, Q4_K, Q8_0, IQ4_XS)
+│   ├── attention.h               # Vectorized Grouped-Query Attention (GQA) & online softmax
+│   ├── sampler.h                 # Temperature, Top-K, Top-P & repetition penalty sampler
+│   └── cgraph.h                  # Native Computation Graph IR & execution dispatcher
 ├── src/
 │   ├── hardware.c                # CPU topology scanner & pthread affinity
 │   ├── simd_vnni.c               # GEMV, RMSNorm, RoPE, Softmax, SwiGLU micro-kernels
@@ -333,7 +364,12 @@ noel/
 │   ├── priority.c                # Dynamic priority scoring, tier rebalancing & reporting
 │   ├── pipeline_stages.c         # Offloaded embedding lookups, RoPE cache, and sampling
 │   ├── tokenizer.c               # Tokenizer implementation
-│   ├── engine.c                  # 4-tier pipeline coordinator
+│   ├── gguf_loader.c             # Native GGUF binary parser & tensor indexer
+│   ├── dequant.c                 # AVX2/AVX-VNNI fast dequantization kernels
+│   ├── attention.c               # Vectorized Grouped-Query Attention with online softmax
+│   ├── sampler.c                 # PRNG and nucleus candidate probability sampler
+│   ├── cgraph.c                  # Computation Graph IR compiler & async dispatcher
+│   ├── engine.c                  # 4-tier pipeline coordinator & forward pass
 │   └── main.c                    # CLI runner & interactive generator
 ├── tools/
 │   ├── benchmark_tiers.c         # Micro-benchmark for all 4 hardware tiers
@@ -349,23 +385,27 @@ noel/
 
 ## Development Roadmap: Transition to Standalone LLM Runner
 
-Noel is systematically evolving from an out-of-core hardware acceleration engine into a full standalone local inference runner (like Ollama). Development is partitioned into 4 distinct phases:
+Noel is systematically evolving from an out-of-core hardware acceleration engine into a full standalone local inference runner (like Ollama). Development is partitioned into distinct phases:
 
-* **Phase 1: Heterogeneous Memory & Kernel Infrastructure (Current State / v1.1.0)**:
+* **Phase 1: Heterogeneous Memory & Kernel Infrastructure (Completed)**:
   * 4-Tier Memory Hierarchy (Dedicated GPU VRAM $\leftrightarrow$ Host System RAM $\leftrightarrow$ NVMe SSD Direct I/O $\leftrightarrow$ CPU SIMD).
   * Native AVX-VNNI INT8/INT4 SIMD micro-kernels (`vpdpbusd`) for Intel hybrid P/E-cores.
   * Native Ada Lovelace (`sm_89`) PTX CUDA Driver kernels with pinned host memory (`cuMemHostAlloc`).
   * Dynamic Auto-Tiering (Mode 1 Monolithic GPU vs Mode 2 Heterogeneous HPRTA).
-* **Phase 2: Universal GGUF Tensor Graph & Dynamic Dequantization (In Progress)**:
+* **Phase 2: Universal GGUF Tensor Graph, SIMD Dequantization & Interactive REPL (Completed)**:
   * Zero-copy direct memory-mapping of quantized GGUF tensors (`Q4_K_M`, `IQ4_XS`, `Q5_K`, `Q8_0`).
-  * Architecture autodetection and automated layer mapping from GGUF metadata headers.
-  * Direct tensor binding to Noel's 4 physical storage tiers.
-* **Phase 3: Native Computation Graph Dispatcher**:
-  * Unified transformer forward-pass computational graph for Dense and MoE models (RMSNorm $\to$ GQA QKV $\to$ RoPE $\to$ Attention $\to$ SwiGLU FFN $\to$ Unembedding Head).
-  * Seamless cross-tier tensor dispatch (GPU Attention with concurrent CPU/NVMe FFN streaming).
-* **Phase 4: Full BPE Tokenizer & Interactive REPL (`noel run`)**:
-  * High-speed native BPE / SentencePiece tokenizer with full vocabulary table support.
-  * Interactive terminal REPL (`noel run <model>`) supporting conversational multi-turn prompts and streaming token generation.
+  * Dynamic SIMD dequantization kernels with zero-copy physical pipeline tensor binding.
+  * Embedded GGUF BPE vocabulary tokenizer and real-time streaming REPL (`noel run`).
+* **Phase 3: Native Computation Graph Dispatcher & Full Forward-Pass Pipeline (Completed)**:
+  * Unified transformer forward-pass computational graph IR (RMSNorm $\to$ QKV GEMV $\to$ RoPE $\to$ GQA Attention $\to$ Attn Output $\to$ Residual $\to$ FFN Norm $\to$ SwiGLU $\to$ FFN Down $\to$ Residual $\to$ Output Norm $\to$ LM Head).
+  * Vectorized Grouped-Query Attention (GQA) with single-pass online softmax tracker.
+  * Multi-architecture RoPE rotation (LLaMA paired + NeoX half-split) with frequency scaling.
+  * Temperature, Top-K, Top-P (nucleus), and repetition penalty sampling engine.
+  * Memory buffer reuse optimizer achieving >80% intermediate activation memory savings.
+  * Microsecond execution telemetry and interactive REPL runtime parameter adjustment.
+* **Phase 4: Advanced Tooling, Speculative Decoding & Distributed Sharding (Upcoming)**:
+  * Speculative draft-model execution across hybrid E-cores.
+  * Distributed multi-system memory pooling and OpenAI-compatible HTTP API server.
 
 ---
 

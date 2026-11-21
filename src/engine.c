@@ -185,6 +185,12 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     /* Initialize tokenizer */
     aether_tokenizer_init(&engine->tokenizer, cfg->vocab_size);
 
+    /* Initialize sampler */
+    noel_sampler_init(&engine->sampler, &engine->sampler_cfg, cfg->vocab_size);
+
+    /* Compile computation graph IR */
+    noel_cgraph_compile(&engine->cgraph, &engine->weights, &engine->config);
+
     printf("[Engine] Initialized 4-Tier Pipeline for Dim=%d, Layers=%d, Heads=%d (KV=%d), MoE Experts=%d\n",
            cfg->dim, cfg->n_layers, cfg->n_heads, cfg->n_kv_heads, cfg->n_experts);
     return true;
@@ -266,14 +272,12 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
             aether_streamer_prefetch_async(l + 1, next_offset, next_size);
         }
 
-        /* E. Multi-head Attention on P-cores */
-        for (int h = 0; h < cfg->n_heads; h++) {
-            float *head_q = s->q + h * head_dim;
-            float *head_out = s->xb2 + h * head_dim;
-            for (int d = 0; d < head_dim; d++) {
-                head_out[d] = head_q[d];
-            }
-        }
+        /* E. Grouped-Query Attention (GQA) with Online Softmax */
+        const float *k_layer = s->key_cache + (size_t)l * cfg->seq_len * kv_dim;
+        const float *v_layer = s->val_cache + (size_t)l * cfg->seq_len * kv_dim;
+        noel_gqa_attention(s->xb2, s->q, k_layer, v_layer,
+                           cfg->n_heads, cfg->n_kv_heads, head_dim,
+                           cfg->seq_len, pos, num_p_threads);
 
         /* Attention Output Projection: xb = W_o * xb2 */
         if (w->is_bound_gguf && w->layer_tensors[l].attn_output) {
@@ -379,15 +383,8 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
         aether_gemv_q4_0(s->logits, w->lm_head, s->x, vocab_check, dim, num_p_threads);
     }
 
-    /* 5. Argmax sampling */
-    int32_t best_tok = 0;
-    float best_logit = s->logits[0];
-    for (int v = 1; v < vocab_check; v++) {
-        if (s->logits[v] > best_logit) {
-            best_logit = s->logits[v];
-            best_tok = v;
-        }
-    }
+    /* 5. Sampler with temperature scaling & nucleus filtering */
+    int32_t best_tok = noel_sampler_sample(&engine->sampler, s->logits, vocab_check, NULL, 0);
 
     double t_layer_end = aether_time_sec();
     engine->stats.total_ms += (t_layer_end - t_layer_start) * 1000.0;
@@ -415,9 +412,10 @@ int aether_engine_generate_stream(aether_engine_t *engine,
                                   float top_p,
                                   aether_stream_callback_t callback,
                                   void *user_data) {
-    (void)temperature;
-    (void)top_p;
     if (!engine || !prompt) return 0;
+
+    engine->sampler.config.temperature = temperature;
+    if (top_p > 0.0f) engine->sampler.config.top_p = top_p;
 
     int32_t prompt_tokens[2048];
     int n_prompt = aether_tokenizer_encode(&engine->tokenizer, prompt, prompt_tokens, 2048);
@@ -548,4 +546,6 @@ void aether_engine_shutdown(aether_engine_t *engine) {
     if (engine->weights.lm_head) free(engine->weights.lm_head);
 
     aether_tokenizer_free(&engine->tokenizer);
+    noel_sampler_free(&engine->sampler);
+    noel_cgraph_free(&engine->cgraph);
 }

@@ -27,7 +27,12 @@ static void run_interactive_repl(aether_engine_t *engine) {
     printf("   Model: %-22s | SeqLen: %-5d\n",
            engine->gguf.model_name[0] ? engine->gguf.model_name : "Native GGUF",
            engine->config.seq_len);
-    printf("   Commands: /exit (quit), /clear (reset context), /stats (info) \n");
+    printf("   Params: Temp=%.2f, Top-P=%.2f, Top-K=%d, Rep=%.2f\n",
+           engine->sampler.config.temperature,
+           engine->sampler.config.top_p,
+           engine->sampler.config.top_k,
+           engine->sampler.config.repetition_penalty);
+    printf("   Commands: /exit, /clear, /stats, /params, /temp, /top_p, /top_k, /rep, /graph\n");
     printf("=================================================================\n\n");
 
     char line[4096];
@@ -61,7 +66,66 @@ static void run_interactive_repl(aether_engine_t *engine) {
 
         if (strcmp(line, "/stats") == 0) {
             printf("• Active Context Pos:  %d / %d tokens\n", engine->cur_pos, engine->config.seq_len);
-            printf("• Engine Throughput:   %.2f tokens/second\n\n", engine->stats.tokens_per_sec);
+            printf("• Engine Throughput:   %.2f tokens/second\n", engine->stats.tokens_per_sec);
+            printf("• Graph Nodes:         %d compiled\n\n", engine->cgraph.node_count);
+            continue;
+        }
+
+        if (strcmp(line, "/graph") == 0) {
+            noel_cgraph_print(&engine->cgraph);
+            printf("\n");
+            continue;
+        }
+
+        if (strcmp(line, "/params") == 0) {
+            printf("• Temperature:         %.2f\n", engine->sampler.config.temperature);
+            printf("• Top-P (Nucleus):     %.2f\n", engine->sampler.config.top_p);
+            printf("• Top-K Candidates:    %d\n", engine->sampler.config.top_k);
+            printf("• Repetition Penalty:  %.2f\n\n", engine->sampler.config.repetition_penalty);
+            continue;
+        }
+
+        if (strncmp(line, "/temp ", 6) == 0) {
+            float val = (float)atof(line + 6);
+            engine->sampler.config.temperature = val;
+            printf("\033[1;33m[Sampling temperature updated to %.2f]\033[0m\n\n", val);
+            continue;
+        }
+
+        if (strncmp(line, "/top_p ", 7) == 0 || strncmp(line, "/topp ", 6) == 0) {
+            const char *arg = (line[5] == 'p') ? line + 7 : line + 6;
+            float val = (float)atof(arg);
+            engine->sampler.config.top_p = val;
+            printf("\033[1;33m[Nucleus Top-P threshold updated to %.2f]\033[0m\n\n", val);
+            continue;
+        }
+
+        if (strncmp(line, "/top_k ", 7) == 0 || strncmp(line, "/topk ", 6) == 0) {
+            const char *arg = (line[5] == 'k') ? line + 7 : line + 6;
+            int val = atoi(arg);
+            engine->sampler.config.top_k = val;
+            printf("\033[1;33m[Top-K candidate limit updated to %d]\033[0m\n\n", val);
+            continue;
+        }
+
+        if (strncmp(line, "/rep ", 5) == 0) {
+            float val = (float)atof(line + 5);
+            engine->sampler.config.repetition_penalty = val;
+            printf("\033[1;33m[Repetition penalty updated to %.2f]\033[0m\n\n", val);
+            continue;
+        }
+
+        if (strcmp(line, "/help") == 0) {
+            printf("Available REPL commands:\n");
+            printf("  /temp <float>     Set sampling temperature (0.0 = greedy argmax)\n");
+            printf("  /top_p <float>    Set nucleus sampling Top-P threshold (0.0 - 1.0)\n");
+            printf("  /top_k <int>      Set Top-K candidate filtering limit\n");
+            printf("  /rep <float>      Set repetition penalty (e.g. 1.1)\n");
+            printf("  /params           Display active sampling parameters\n");
+            printf("  /graph            Display compiled Noel computation graph IR\n");
+            printf("  /stats            Display context position and token throughput\n");
+            printf("  /clear            Reset conversational context to position 0\n");
+            printf("  /exit             Exit REPL shell\n\n");
             continue;
         }
 
@@ -75,7 +139,10 @@ static void run_interactive_repl(aether_engine_t *engine) {
         }
 
         printf("\033[1;32m");
-        aether_engine_generate_stream(engine, formatted_prompt, 128, 0.0f, 0.9f, repl_stream_cb, NULL);
+        aether_engine_generate_stream(engine, formatted_prompt, 128,
+                                      engine->sampler.config.temperature,
+                                      engine->sampler.config.top_p,
+                                      repl_stream_cb, NULL);
         printf("\033[0m\n\n");
     }
 }
@@ -104,6 +171,11 @@ int main(int argc, char **argv) {
     const char *prompt = "In the deep expanse of space, an autonomous starship";
     int max_gen_tokens = 32;
     bool is_repl = false;
+    float opt_temp = 0.0f;
+    float opt_top_p = 0.9f;
+    int opt_top_k = 40;
+    float opt_rep_penalty = 1.1f;
+    bool show_graph = false;
 
     /* Check for `noel run <model>` command */
     if (argc >= 2 && (strcmp(argv[1], "run") == 0 || strcmp(argv[1], "chat") == 0)) {
@@ -154,6 +226,16 @@ int main(int argc, char **argv) {
             prompt = argv[++i];
         } else if (strcmp(argv[i], "--tokens") == 0 && i + 1 < argc) {
             max_gen_tokens = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--temp") == 0 && i + 1 < argc) {
+            opt_temp = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--top-p") == 0 && i + 1 < argc) {
+            opt_top_p = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--top-k") == 0 && i + 1 < argc) {
+            opt_top_k = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--rep-penalty") == 0 && i + 1 < argc) {
+            opt_rep_penalty = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--graph") == 0) {
+            show_graph = true;
         } else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
             is_repl = true;
         } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
@@ -172,6 +254,15 @@ int main(int argc, char **argv) {
     if (!aether_engine_init(&engine, &cfg, model_path)) {
         fprintf(stderr, "Failed to initialize Noel Engine\n");
         return 1;
+    }
+
+    engine.sampler.config.temperature = opt_temp;
+    engine.sampler.config.top_p = opt_top_p;
+    engine.sampler.config.top_k = opt_top_k;
+    engine.sampler.config.repetition_penalty = opt_rep_penalty;
+
+    if (show_graph) {
+        noel_cgraph_print(&engine.cgraph);
     }
 
     if (is_repl) {
