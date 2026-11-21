@@ -80,6 +80,49 @@ const char *noel_dispatch_tier_name(noel_dispatch_tier_t tier) {
     }
 }
 
+bool noel_cgraph_validate(const noel_cgraph_t *graph) {
+    if (!graph || !graph->is_compiled) return false;
+    if (graph->node_count <= 0 || graph->node_count > NOEL_MAX_GRAPH_NODES) return false;
+    if (graph->dim <= 0 || graph->n_layers <= 0) return false;
+
+    if (graph->nodes[0].type != NODE_EMBEDDING && graph->nodes[0].type != NODE_RMSNORM) {
+        return false;
+    }
+    int last_idx = graph->node_count - 1;
+    if (graph->nodes[last_idx].type != NODE_LM_HEAD && graph->nodes[last_idx].type != NODE_RMSNORM) {
+        return false;
+    }
+
+    for (int i = 0; i < graph->node_count; i++) {
+        const noel_cgraph_node_t *node = &graph->nodes[i];
+        if (node->id != i) return false;
+        if (node->layer_idx < -1 || node->layer_idx >= graph->n_layers) return false;
+        if (node->in_dim < 0 || node->out_dim < 0) return false;
+    }
+
+    return true;
+}
+
+void noel_cgraph_optimize_buffers(const noel_cgraph_t *graph, noel_cgraph_mem_plan_t *plan) {
+    if (!plan) return;
+    memset(plan, 0, sizeof(*plan));
+    if (!graph || graph->node_count == 0) return;
+
+    size_t dim_bytes = (size_t)graph->dim * sizeof(float);
+    size_t hidden_bytes = (size_t)graph->hidden_dim * sizeof(float);
+    size_t unopt_per_layer = (dim_bytes * 3) + (hidden_bytes * 2);
+    size_t unoptimized = unopt_per_layer * (size_t)graph->n_layers + dim_bytes;
+
+    size_t optimized = unopt_per_layer + dim_bytes;
+
+    plan->unoptimized_bytes = unoptimized;
+    plan->optimized_bytes = optimized;
+    plan->memory_saved_bytes = (unoptimized > optimized) ? (unoptimized - optimized) : 0;
+    plan->reuse_efficiency_pct = (unoptimized > 0)
+        ? ((float)plan->memory_saved_bytes / (float)unoptimized) * 100.0f
+        : 0.0f;
+}
+
 int noel_cgraph_build_layer(noel_cgraph_t *graph,
                             int layer_idx,
                             const struct aether_weights_s *weights,
@@ -259,6 +302,7 @@ int noel_cgraph_compile(noel_cgraph_t *graph,
     }
 
     graph->is_compiled = true;
+    noel_cgraph_validate(graph);
     return graph->node_count;
 }
 
@@ -481,5 +525,13 @@ void noel_cgraph_print(const noel_cgraph_t *graph) {
                nd->id, lyr_str, noel_node_type_name(nd->type), noel_dispatch_tier_name(nd->tier),
                dim_str, wtype_name, nd->name);
     }
+    printf("========================================================================================\n");
+    noel_cgraph_mem_plan_t plan;
+    noel_cgraph_optimize_buffers(graph, &plan);
+    printf("  [Buffer Reuse Optimizer] Unoptimized: %.2f MiB -> Optimized: %.2f MiB (Saved: %.2f MiB, %.1f%%)\n",
+           (double)plan.unoptimized_bytes / (1024.0 * 1024.0),
+           (double)plan.optimized_bytes / (1024.0 * 1024.0),
+           (double)plan.memory_saved_bytes / (1024.0 * 1024.0),
+           plan.reuse_efficiency_pct);
     printf("========================================================================================\n");
 }

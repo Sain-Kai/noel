@@ -72,12 +72,23 @@ typedef struct {
     double total_exec_time_us;
 } noel_cgraph_t;
 
+typedef struct {
+    size_t unoptimized_bytes;
+    size_t optimized_bytes;
+    size_t memory_saved_bytes;
+    float reuse_efficiency_pct;
+} noel_cgraph_mem_plan_t;
+
 /* Graph Lifecycle APIs */
 void noel_cgraph_init(noel_cgraph_t *graph, int dim, int hidden_dim, int n_layers, int n_heads, int n_kv_heads);
 int noel_cgraph_add_node(noel_cgraph_t *graph, noel_node_type_t type, noel_dispatch_tier_t tier, int layer_idx, const char *name);
 void noel_cgraph_free(noel_cgraph_t *graph);
 const char *noel_node_type_name(noel_node_type_t type);
 const char *noel_dispatch_tier_name(noel_dispatch_tier_t tier);
+
+/* Validation & Memory Buffer Reuse Optimizer */
+bool noel_cgraph_validate(const noel_cgraph_t *graph);
+void noel_cgraph_optimize_buffers(const noel_cgraph_t *graph, noel_cgraph_mem_plan_t *plan);
 
 /* Layer & Full Transformer Compilation */
 int noel_cgraph_build_layer(noel_cgraph_t *graph,
