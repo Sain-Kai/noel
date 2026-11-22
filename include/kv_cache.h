@@ -18,7 +18,7 @@ typedef enum {
     NOEL_KV_Q4_0      = 4
 } noel_kv_dtype_t;
 
-typedef struct {
+typedef struct noel_kv_cache_s {
     noel_kv_dtype_t dtype;
     int n_layers;
     int seq_len;
