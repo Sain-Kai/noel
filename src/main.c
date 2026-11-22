@@ -32,7 +32,7 @@ static void run_interactive_repl(aether_engine_t *engine) {
            engine->sampler.config.top_p,
            engine->sampler.config.top_k,
            engine->sampler.config.repetition_penalty);
-    printf("   Commands: /exit, /clear, /stats, /params, /temp, /top_p, /top_k, /rep, /graph\n");
+    printf("   Commands: /exit, /clear, /stats, /params, /temp, /top_p, /top_k, /rep, /graph, /kv_info, /chunk, /sink, /rollback\n");
     printf("=================================================================\n\n");
 
     char line[4096];
@@ -115,12 +115,65 @@ static void run_interactive_repl(aether_engine_t *engine) {
             continue;
         }
 
+        if (strcmp(line, "/kv_info") == 0 || strcmp(line, "/kv") == 0) {
+            printf("• KV Cache Mode:       %s\n",
+                   engine->use_quantized_kv ? noel_kv_dtype_name(engine->kv_dtype) : "FP32 Standard");
+            if (engine->use_quantized_kv) {
+                printf("• Memory Compression:  %.2fx\n", noel_kv_cache_compression_ratio(&engine->kv_cache));
+                printf("• Allocated Storage:   %.2f MiB (Baseline FP32: %.2f MiB)\n",
+                       (double)engine->kv_cache.total_bytes / (1024.0 * 1024.0),
+                       (double)engine->kv_cache.fp32_equivalent_bytes / (1024.0 * 1024.0));
+            }
+            printf("• Active Context Pos:  %d / %d tokens\n\n", engine->cur_pos, engine->config.seq_len);
+            continue;
+        }
+
+        if (strncmp(line, "/chunk", 6) == 0) {
+            if (strlen(line) > 7) {
+                int sz = atoi(line + 7);
+                if (sz > 0) {
+                    engine->prefill_cfg.chunk_size = sz;
+                    engine->use_chunked_prefill = true;
+                    printf("\033[1;33m[Prefill chunk size updated to %d tokens]\033[0m\n\n", sz);
+                }
+            } else {
+                printf("• Chunked Prefill:     %s (Chunk Size: %d tokens)\n\n",
+                       engine->use_chunked_prefill ? "ENABLED" : "DISABLED",
+                       engine->prefill_cfg.chunk_size);
+            }
+            continue;
+        }
+
+        if (strncmp(line, "/sink", 5) == 0) {
+            int n_sink = 4;
+            int n_recent = 64;
+            if (sscanf(line + 5, "%d %d", &n_sink, &n_recent) < 2) {
+                n_sink = 4;
+                n_recent = 64;
+            }
+            int new_pos = aether_engine_apply_attention_sink(engine, n_sink, n_recent);
+            printf("\033[1;33m[Attention sink applied: pos rolled to %d (sink=%d, recent=%d)]\033[0m\n\n",
+                   new_pos, n_sink, n_recent);
+            continue;
+        }
+
+        if (strncmp(line, "/rollback ", 10) == 0) {
+            int target_pos = atoi(line + 10);
+            aether_engine_rollback(engine, target_pos);
+            printf("\033[1;33m[Context rolled back to position %d]\033[0m\n\n", engine->cur_pos);
+            continue;
+        }
+
         if (strcmp(line, "/help") == 0) {
             printf("Available REPL commands:\n");
             printf("  /temp <float>     Set sampling temperature (0.0 = greedy argmax)\n");
             printf("  /top_p <float>    Set nucleus sampling Top-P threshold (0.0 - 1.0)\n");
             printf("  /top_k <int>      Set Top-K candidate filtering limit\n");
             printf("  /rep <float>      Set repetition penalty (e.g. 1.1)\n");
+            printf("  /kv_info          Inspect quantized KV cache precision & compression\n");
+            printf("  /chunk <int>      Inspect or adjust prompt prefill chunk size\n");
+            printf("  /sink <s> <r>     Manually apply StreamingLLM sink & rolling window\n");
+            printf("  /rollback <pos>   Transactionally rollback KV cache to sequence pos\n");
             printf("  /params           Display active sampling parameters\n");
             printf("  /graph            Display compiled Noel computation graph IR\n");
             printf("  /stats            Display context position and token throughput\n");
