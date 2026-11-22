@@ -176,6 +176,10 @@ int main(int argc, char **argv) {
     int opt_top_k = 40;
     float opt_rep_penalty = 1.1f;
     bool show_graph = false;
+    const char *draft_model_path = NULL;
+    int spec_tokens = 0;
+    const char *kv_quant_str = NULL;
+    int chunk_prefill_size = 0;
 
     /* Check for `noel run <model>` command */
     if (argc >= 2 && (strcmp(argv[1], "run") == 0 || strcmp(argv[1], "chat") == 0)) {
@@ -238,6 +242,14 @@ int main(int argc, char **argv) {
             show_graph = true;
         } else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
             is_repl = true;
+        } else if (strcmp(argv[i], "--draft") == 0 && i + 1 < argc) {
+            draft_model_path = argv[++i];
+        } else if (strcmp(argv[i], "--spec-tokens") == 0 && i + 1 < argc) {
+            spec_tokens = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--kv-quant") == 0 && i + 1 < argc) {
+            kv_quant_str = argv[++i];
+        } else if (strcmp(argv[i], "--chunk-prefill") == 0 && i + 1 < argc) {
+            chunk_prefill_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             const char *m = argv[++i];
             if (strcmp(m, "gpu") == 0 || strcmp(m, "vram") == 0) {
@@ -251,9 +263,58 @@ int main(int argc, char **argv) {
     }
 
     aether_engine_t engine;
+    memset(&engine, 0, sizeof(engine));
+
+    /* Configure KV cache precision */
+    if (kv_quant_str) {
+        if (strcasecmp(kv_quant_str, "fp8") == 0 || strcasecmp(kv_quant_str, "fp8_e4m3") == 0) {
+            engine.kv_dtype = NOEL_KV_FP8_E4M3;
+            engine.use_quantized_kv = true;
+        } else if (strcasecmp(kv_quant_str, "fp8_e5m2") == 0) {
+            engine.kv_dtype = NOEL_KV_FP8_E5M2;
+            engine.use_quantized_kv = true;
+        } else if (strcasecmp(kv_quant_str, "q8_0") == 0 || strcasecmp(kv_quant_str, "q8") == 0) {
+            engine.kv_dtype = NOEL_KV_Q8_0;
+            engine.use_quantized_kv = true;
+        } else if (strcasecmp(kv_quant_str, "q4_0") == 0 || strcasecmp(kv_quant_str, "q4") == 0) {
+            engine.kv_dtype = NOEL_KV_Q4_0;
+            engine.use_quantized_kv = true;
+        }
+    }
+
+    /* Configure chunked prefill */
+    if (chunk_prefill_size > 0) {
+        engine.use_chunked_prefill = true;
+        engine.prefill_cfg.chunk_size = chunk_prefill_size;
+    }
+
     if (!aether_engine_init(&engine, &cfg, model_path)) {
         fprintf(stderr, "Failed to initialize Noel Engine\n");
         return 1;
+    }
+
+    /* Initialize optional draft model for speculative decoding */
+    aether_engine_t draft_engine;
+    memset(&draft_engine, 0, sizeof(draft_engine));
+    bool has_draft = false;
+    noel_speculative_config_t spec_cfg;
+    noel_speculative_config_init_default(&spec_cfg);
+    if (spec_tokens > 0) spec_cfg.num_speculative_tokens = spec_tokens;
+
+    if (draft_model_path) {
+        noel_config_t draft_cfg = cfg;
+        noel_gguf_t draft_gguf;
+        if (noel_gguf_open(&draft_gguf, draft_model_path)) {
+            draft_cfg = draft_gguf.config;
+            noel_gguf_close(&draft_gguf);
+        }
+        draft_engine.kv_dtype = engine.kv_dtype;
+        draft_engine.use_quantized_kv = engine.use_quantized_kv;
+        if (aether_engine_init(&draft_engine, &draft_cfg, draft_model_path)) {
+            has_draft = true;
+            printf("[Speculative] Initialized Draft Model: %s (Gamma=%d tokens)\n",
+                   draft_model_path, spec_cfg.num_speculative_tokens);
+        }
     }
 
     engine.sampler.config.temperature = opt_temp;
@@ -267,6 +328,14 @@ int main(int argc, char **argv) {
 
     if (is_repl) {
         run_interactive_repl(&engine);
+    } else if (has_draft) {
+        printf("\n=== Speculative Generation (Draft: %s, Gamma: %d) ===\n",
+               draft_model_path, spec_cfg.num_speculative_tokens);
+        printf("Prompt: \"%s\"\nOutput: ", prompt);
+        fflush(stdout);
+        aether_engine_generate_speculative(&engine, &draft_engine, prompt, max_gen_tokens, &spec_cfg, repl_stream_cb, NULL);
+        printf("\n");
+        aether_engine_shutdown(&draft_engine);
     } else {
         aether_engine_generate(&engine, prompt, max_gen_tokens);
     }
