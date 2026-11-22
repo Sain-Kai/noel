@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -O3 -march=native -mavx2 -mavxvnni -mfma -fopenmp -pthread -Wall -Wextra -Iinclude -D_GNU_SOURCE
 LDFLAGS = -fopenmp -pthread -ldl -lm
 
-SRCS = src/hardware.c src/simd_vnni.c src/cuda_backend.c src/nvme_streamer.c src/sparsity.c src/priority.c src/pipeline_stages.c src/tokenizer.c src/gguf_loader.c src/dequant.c src/attention.c src/sampler.c src/cgraph.c src/engine.c
+SRCS = src/hardware.c src/simd_vnni.c src/cuda_backend.c src/nvme_streamer.c src/sparsity.c src/priority.c src/pipeline_stages.c src/tokenizer.c src/gguf_loader.c src/dequant.c src/attention.c src/sampler.c src/cgraph.c src/kv_cache.c src/engine.c
 OBJS = $(SRCS:.c=.o)
 
 all: noel aether benchmark generate_weights benchmark_cpu_offload inspect_gguf test_engine libnoel.so
