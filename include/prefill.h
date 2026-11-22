@@ -87,6 +87,38 @@ noel_prefill_chunk_t noel_prefill_get_chunk(const int32_t *tokens, int prompt_le
 struct aether_weights_s;
 typedef struct aether_weights_s aether_weights_t;
 
+struct aether_state_s;
+typedef struct aether_state_s aether_state_t;
+
+struct noel_kv_cache_s;
+typedef struct noel_kv_cache_s noel_kv_cache_t;
+
+/**
+ * @brief Populate KV cache in batch for all tokens in a prompt chunk
+ */
+void noel_prefill_populate_kv(const noel_prefill_state_t *state,
+                              aether_state_t *engine_state,
+                              noel_kv_cache_t *quant_kv,
+                              int layer,
+                              const noel_prefill_chunk_t *chunk,
+                              int kv_dim,
+                              int seq_len);
+
+/**
+ * @brief Compute causal grouped-query attention across all tokens in a prompt chunk
+ */
+void noel_prefill_causal_attention(noel_prefill_state_t *state,
+                                   const aether_state_t *engine_state,
+                                   const noel_kv_cache_t *quant_kv,
+                                   int layer,
+                                   const noel_prefill_chunk_t *chunk,
+                                   int dim,
+                                   int n_heads,
+                                   int n_kv_heads,
+                                   int head_dim,
+                                   int seq_len,
+                                   int num_threads);
+
 /**
  * @brief Compute batched QKV projections and RoPE for a prompt chunk
  *
