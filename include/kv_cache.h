@@ -51,6 +51,17 @@ const char *noel_kv_dtype_name(noel_kv_dtype_t dtype);
 size_t noel_kv_dtype_row_bytes(noel_kv_dtype_t dtype, int kv_dim);
 double noel_kv_cache_compression_ratio(const noel_kv_cache_t *cache);
 
+/* FP8 Codecs & Row Conversions */
+uint8_t noel_f32_to_fp8_e4m3(float x);
+float noel_fp8_e4m3_to_f32(uint8_t val);
+uint8_t noel_f32_to_fp8_e5m2(float x);
+float noel_fp8_e5m2_to_f32(uint8_t val);
+
+void noel_quantize_row_fp8_e4m3(uint8_t *dst, const float *src, int n, float *out_scale);
+void noel_dequantize_row_fp8_e4m3(float *dst, const uint8_t *src, int n, float scale);
+void noel_quantize_row_fp8_e5m2(uint8_t *dst, const float *src, int n, float *out_scale);
+void noel_dequantize_row_fp8_e5m2(float *dst, const uint8_t *src, int n, float scale);
+
 #ifdef __cplusplus
 }
 #endif
