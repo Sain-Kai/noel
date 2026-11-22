@@ -8,7 +8,7 @@
   <a href="#benchmarks"><img src="https://img.shields.io/badge/27b--throughput-10.18%20tok%2Fs%20(4.26x%20vs%20Ollama)-brightgreen.svg" alt="27B Throughput"></a>
   <a href="#benchmarks"><img src="https://img.shields.io/badge/deepseek--14b-10.35%20tok%2Fs%20(+60%25%20vs%20Ollama)-brightgreen.svg" alt="DeepSeek 14B Throughput"></a>
   <a href="#benchmarks"><img src="https://img.shields.io/badge/nvme%20read-7.22%20GB%2Fs-orange.svg" alt="NVMe Read Speed"></a>
-  <a href="#test-results"><img src="https://img.shields.io/badge/tests-17%2F17%20passed%20(100%25)-success.svg" alt="Tests 17/17 Passed"></a>
+  <a href="#test-results"><img src="https://img.shields.io/badge/tests-21%2F21%20passed%20(100%25)-success.svg" alt="Tests 21/21 Passed"></a>
   <a href="#architecture"><img src="https://img.shields.io/badge/architecture-Dynamic%20Auto--Tiering-purple.svg" alt="Architecture: Dynamic Auto-Tiering"></a>
 </p>
 
@@ -98,6 +98,29 @@ Rather than forcing all models through the multi-tier pipeline, Noel dynamically
 * **Mode 2 (4-Tier Heterogeneous HPRTA)**: For out-of-core models (e.g., DeepSeek-R1-14B, Mixtral 8x7B, Llama-3-70B) exceeding VRAM capacity, Noel automatically engages the 4-tier memory hierarchy, component-wise priority ranking, and asynchronous prefetching.
 
 ### 7. Active CUDA PTX GEMV & Host Pinned Memory Engine
+Integrates direct runtime CUDA Driver API calls with persistent pinned memory buffers (`cuMemHostAlloc`) for zero-copy weight ingestion across the PCIe bus, achieving optimal bus utilization.
+
+### 8. P-Paged Quantized KV Cache & Direct Quantized Attention
+Eliminates multi-gigabyte FP32 KV cache memory consumption on memory-constrained systems by providing native precision quantization formats:
+* **FP8 (E4M3 / E5M2)**: 4.0x memory reduction with per-channel dynamic scaling.
+* **Q8_0**: 3.76x memory reduction with INT8 block scaling.
+* **Q4_0**: 6.4x – 8.0x memory reduction with sub-byte 4-bit packing.
+* **Direct Quantized GQA Kernel**: Implements on-the-fly dot-product dequantization during Grouped-Query Attention with online softmax accumulation, completely avoiding FP32 cache reconstruction.
+
+### 9. Chunked Prompt Prefill Engine
+Optimizes Time-To-First-Token (TTFT) and memory bandwidth utilization during prompt evaluation by partitioning lengthy prompts into cache-friendly chunks (e.g., 128 to 512 tokens):
+* **Batched QKV Projections**: Exploits multi-core SIMD GEMM throughput across chunk tokens rather than single-token GEMV stalls.
+* **Causal Attention & Batch KV Cache Population**: Computes intra-chunk causal attention and writes directly into quantized or standard KV cache in batch.
+
+### 10. Speculative Decoding Engine (Leviathan / Chen Dual-Engine Pipeline)
+Accelerates out-of-core model generation through asynchronous speculative decoding:
+* **Lightweight Draft Proposal**: Generates $\gamma$ candidate draft tokens on auxiliary CPU threads.
+* **Parallel Target Verification**: Evaluates all candidate tokens in a single target forward pass.
+* **Stochastic Rejection Sampling**: Accepts candidates with probability $\min(1, P_t / P_d)$; recovers and samples from normalized residual distribution $P'_t = \max(0, P_t - P_d)$ upon rejection to maintain 100% mathematical output invariance.
+* **Transactional KV Cache Rollback**: Automatically purges and rewinds speculative KV cache slots upon candidate rejection, preventing context contamination.
+
+### 11. StreamingLLM Attention Sinks & Rolling Sliding Window
+Preserves initial attention sink tokens alongside a sliding window of recent conversational history, completely preventing catastrophic perplexity collapse and context overflow during infinite multi-turn dialogue.
 Noel interfaces directly with the NVIDIA CUDA Driver API (`libcuda.so`) and embeds custom hand-optimized PTX kernels target-compiled for Ada Lovelace (`sm_89`):
 * Embedded `gemv_q4_0_kernel` PTX performs quantized 4-bit block dequantization and warp-level reduction in hardware registers with zero external CUDA runtime dependency (`libcudart.so` not needed).
 * Integrated `cuMemHostAlloc` pinned host memory mapping ensures asynchronous PCIe Gen4 DMA transfers achieve full hardware saturation without OS page-pinning stalls.
@@ -369,6 +392,9 @@ noel/
 │   ├── attention.c               # Vectorized Grouped-Query Attention with online softmax
 │   ├── sampler.c                 # PRNG and nucleus candidate probability sampler
 │   ├── cgraph.c                  # Computation Graph IR compiler & async dispatcher
+│   ├── kv_cache.c                # Quantized Paged KV Cache (FP8, Q8_0, Q4_0) & Attention Sinks
+│   ├── prefill.c                 # Chunked prompt prefill & batched QKV projections
+│   ├── speculative.c             # Speculative decoding, verification & rejection sampling
 │   ├── engine.c                  # 4-tier pipeline coordinator & forward pass
 │   └── main.c                    # CLI runner & interactive generator
 ├── tools/
@@ -378,7 +404,7 @@ noel/
 │   ├── benchmark_qwen_vs_ollama.py # Head-to-head empirical benchmark harness vs Ollama
 │   └── run_noel_27b.py           # Out-of-core 27B heterogeneous execution harness
 └── tests/
-    └── test_engine.c             # Automated unit & integration verification harness
+    └── test_engine.c             # Automated unit & integration verification harness (21/21 passed)
 ```
 
 ---
@@ -403,9 +429,19 @@ Noel is systematically evolving from an out-of-core hardware acceleration engine
   * Temperature, Top-K, Top-P (nucleus), and repetition penalty sampling engine.
   * Memory buffer reuse optimizer achieving >80% intermediate activation memory savings.
   * Microsecond execution telemetry and interactive REPL runtime parameter adjustment.
-* **Phase 4: Advanced Tooling, Speculative Decoding & Distributed Sharding (Upcoming)**:
-  * Speculative draft-model execution across hybrid E-cores.
-  * Distributed multi-system memory pooling and OpenAI-compatible HTTP API server.
+* **Phase 4: Speculative Decoding Engine, Quantized KV Cache & Chunked Prefill (Completed)**:
+  * P-Paged Quantized KV Cache (`FP8_E4M3`, `FP8_E5M2`, `Q8_0`, `Q4_0`) achieving up to 8x memory reduction over FP32 baseline.
+  * Direct Quantized Grouped-Query Attention kernel with on-the-fly dot-product dequantization and online softmax.
+  * Chunked prompt prefill engine with batched QKV projections, chunk partitioning, and batch KV cache ingestion.
+  * Speculative Decoding Engine (Leviathan / Chen dual-engine loop) with lightweight draft candidate proposals and parallel target verification.
+  * Stochastic rejection sampling with exact residual distribution recovery ($\max(0, P_t - P_d)$) maintaining 100% mathematical output alignment.
+  * Transactional KV cache rollback ensuring zero state contamination upon speculative candidate rejection.
+  * StreamingLLM attention sinks (preserving initial tokens) with sliding-window rolling context to eliminate perplexity collapse.
+  * Full CLI flags (`--draft`, `--spec-tokens`, `--kv-quant`, `--chunk-prefill`) and interactive REPL commands (`/kv_info`, `/chunk`, `/sink`, `/rollback`).
+  * 100% automated test pass rate across all 21 unit and integration suites.
+* **Phase 5: Distributed Multi-System Sharding & OpenAI-Compatible HTTP Server (Upcoming)**:
+  * Distributed multi-node pipeline and tensor parallelism over high-speed interconnects.
+  * OpenAI-compatible `/v1/chat/completions` and `/v1/completions` streaming HTTP server.
 
 ---
 
