@@ -782,6 +782,137 @@ static bool test_computation_graph_pipeline(void) {
     return ok_nodes && ok_val && ok_plan;
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 18: Quantized KV Cache Precision & Memory Compression Ratio   */
+/* ------------------------------------------------------------------ */
+static bool test_quantized_kv_cache_compression(void) {
+    int n_layers = 4;
+    int seq_len = 128;
+    int n_kv_heads = 2;
+    int head_dim = 64;
+    int kv_dim = n_kv_heads * head_dim;
+
+    noel_kv_dtype_t dtypes[] = {
+        NOEL_KV_FP8_E4M3,
+        NOEL_KV_FP8_E5M2,
+        NOEL_KV_Q8_0,
+        NOEL_KV_Q4_0
+    };
+    int num_dtypes = 4;
+
+    float *k_orig = (float *)malloc(kv_dim * sizeof(float));
+    float *v_orig = (float *)malloc(kv_dim * sizeof(float));
+    float *k_dec = (float *)malloc(kv_dim * sizeof(float));
+    float *v_dec = (float *)malloc(kv_dim * sizeof(float));
+
+    for (int i = 0; i < kv_dim; i++) {
+        k_orig[i] = sinf((float)i * 0.1f) * 0.8f;
+        v_orig[i] = cosf((float)i * 0.1f) * 0.8f;
+    }
+
+    bool all_ok = true;
+
+    for (int d = 0; d < num_dtypes; d++) {
+        noel_kv_cache_t cache;
+        if (noel_kv_cache_init(&cache, dtypes[d], n_layers, seq_len, n_kv_heads, head_dim) != 0) {
+            all_ok = false;
+            break;
+        }
+
+        double comp_ratio = noel_kv_cache_compression_ratio(&cache);
+        if (comp_ratio < 2.0) all_ok = false;
+
+        /* Store and load from layer 1, pos 10 */
+        noel_kv_cache_store(&cache, 1, 10, k_orig, v_orig);
+        noel_kv_cache_load(&cache, 1, 10, k_dec, v_dec);
+
+        /* Verify accuracy */
+        float max_k_err = 0.0f;
+        float max_v_err = 0.0f;
+        for (int i = 0; i < kv_dim; i++) {
+            float err_k = fabsf(k_orig[i] - k_dec[i]);
+            float err_v = fabsf(v_orig[i] - v_dec[i]);
+            if (err_k > max_k_err) max_k_err = err_k;
+            if (err_v > max_v_err) max_v_err = err_v;
+        }
+
+        /* Q4_0 max error ~0.15, FP8 ~0.05, Q8 ~0.02 */
+        if (max_k_err > 0.20f || max_v_err > 0.20f || comp_ratio < 2.0) {
+            all_ok = false;
+        }
+
+        noel_kv_cache_free(&cache);
+    }
+
+    free(k_orig);
+    free(v_orig);
+    free(k_dec);
+    free(v_dec);
+
+    return all_ok;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 19: Direct Quantized Grouped-Query Attention Dot-Product      */
+/* ------------------------------------------------------------------ */
+static bool test_direct_quantized_gqa_attention(void) {
+    int n_heads = 8;
+    int n_kv_heads = 2;
+    int head_dim = 64;
+    int dim = n_heads * head_dim;
+    int kv_dim = n_kv_heads * head_dim;
+    int seq_len = 32;
+    int n_layers = 1;
+
+    float *q = (float *)malloc(dim * sizeof(float));
+    float *out_fp32 = (float *)malloc(dim * sizeof(float));
+    float *out_quant = (float *)malloc(dim * sizeof(float));
+    float *fp32_k_cache = (float *)calloc(seq_len * kv_dim, sizeof(float));
+    float *fp32_v_cache = (float *)calloc(seq_len * kv_dim, sizeof(float));
+
+    for (int i = 0; i < dim; i++) {
+        q[i] = ((float)rand() / (float)RAND_MAX) * 0.1f;
+    }
+
+    noel_kv_cache_t qcache;
+    noel_kv_cache_init(&qcache, NOEL_KV_Q8_0, n_layers, seq_len, n_kv_heads, head_dim);
+
+    /* Populate 8 tokens */
+    float temp_k[128], temp_v[128];
+    for (int pos = 0; pos < 8; pos++) {
+        for (int i = 0; i < kv_dim; i++) {
+            temp_k[i] = sinf((float)(pos * kv_dim + i) * 0.05f) * 0.5f;
+            temp_v[i] = cosf((float)(pos * kv_dim + i) * 0.05f) * 0.5f;
+        }
+        memcpy(fp32_k_cache + pos * kv_dim, temp_k, kv_dim * sizeof(float));
+        memcpy(fp32_v_cache + pos * kv_dim, temp_v, kv_dim * sizeof(float));
+        noel_kv_cache_store(&qcache, 0, pos, temp_k, temp_v);
+    }
+
+    int test_pos = 7;
+    noel_gqa_attention(out_fp32, q, fp32_k_cache, fp32_v_cache,
+                       n_heads, n_kv_heads, head_dim, seq_len, test_pos, 1);
+
+    noel_gqa_attention_quantized(out_quant, q, &qcache, 0,
+                                 n_heads, n_kv_heads, head_dim, test_pos, 1);
+
+    /* Compare outputs: dot product across attention heads */
+    float max_diff = 0.0f;
+    for (int i = 0; i < dim; i++) {
+        float diff = fabsf(out_fp32[i] - out_quant[i]);
+        if (diff > max_diff) max_diff = diff;
+    }
+
+    noel_kv_cache_free(&qcache);
+    free(q);
+    free(out_fp32);
+    free(out_quant);
+    free(fp32_k_cache);
+    free(fp32_v_cache);
+
+    return (max_diff < 0.05f);
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("        AETHER INFERENCE ENGINE: AUTOMATED TEST HARNESS          \n");
@@ -824,6 +955,10 @@ int main(void) {
     RUN_TEST("Vectorized Grouped-Query Attention (GQA)", test_gqa_attention_correctness);
     RUN_TEST("Nucleus Top-P, Top-K & Temperature Sampler", test_sampler_precision);
     RUN_TEST("Computation Graph Validation & Buffer Reuse", test_computation_graph_pipeline);
+
+    printf("\n--- Quantized KV Cache & Attention Tests ---\n");
+    RUN_TEST("Quantized KV Cache Precision & Compression", test_quantized_kv_cache_compression);
+    RUN_TEST("Direct Quantized GQA Attention Kernel", test_direct_quantized_gqa_attention);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",

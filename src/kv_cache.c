@@ -159,20 +159,17 @@ uint8_t noel_f32_to_fp8_e4m3(float x) {
         x = -x;
     }
     if (x >= 448.0f) return sign | 0x7E; /* Max finite: exp=15, mant=6 */
-    if (x < (1.0f / 128.0f)) return sign; /* Underflow to 0 */
+    if (x < (1.0f / 512.0f)) return sign; /* Underflow to 0 */
 
     int exp;
     float frac = frexpf(x, &exp); /* x = frac * 2^exp, frac in [0.5, 1.0) */
-    /* Normalize to 1.mantissa: x = (1 + m/8) * 2^(e4 - 7) */
-    int biased_exp = exp + 6; /* since frexp gives exp relative to [0.5, 1.0) */
+    int biased_exp = exp + 6;     /* bias = 7, frac in [0.5, 1.0) => 2*frac in [1.0, 2.0) */
 
     if (biased_exp <= 0) {
-        /* Subnormal */
-        int mant = (int)roundf(x * 64.0f * 8.0f);
+        /* Subnormal: value = mant * 2^-9 */
+        int mant = (int)roundf(x * 512.0f);
         if (mant > 7) mant = 7;
         return sign | (uint8_t)mant;
-    } else if (biased_exp >= 15) {
-        return sign | 0x7E;
     }
 
     float normalized = frac * 2.0f; /* in [1.0, 2.0) */
@@ -180,8 +177,12 @@ uint8_t noel_f32_to_fp8_e4m3(float x) {
     if (mant >= 8) {
         mant = 0;
         biased_exp++;
-        if (biased_exp >= 15) return sign | 0x7E;
     }
+
+    if (biased_exp > 15 || (biased_exp == 15 && mant > 6)) {
+        return sign | 0x7E; /* Max finite: exp=15, mant=6 */
+    }
+
     return sign | ((uint8_t)biased_exp << 3) | ((uint8_t)mant & 0x07);
 }
 
