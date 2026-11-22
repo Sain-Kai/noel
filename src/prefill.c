@@ -7,9 +7,14 @@
  */
 
 #include "prefill.h"
+#include "engine.h"
+#include "dequant.h"
+#include "simd_vnni.h"
+#include "pipeline_stages.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <omp.h>
 
 void noel_prefill_config_init_default(noel_prefill_config_t *cfg) {
     if (!cfg) return;
@@ -93,4 +98,75 @@ noel_prefill_chunk_t noel_prefill_get_chunk(const int32_t *tokens, int prompt_le
     chunk.num_tokens = cur_tokens;
     chunk.tokens = tokens + start_pos;
     return chunk;
+}
+
+void noel_prefill_project_qkv(noel_prefill_state_t *state,
+                              const aether_weights_t *weights,
+                              int layer,
+                              const noel_prefill_chunk_t *chunk,
+                              int dim,
+                              int n_heads,
+                              int n_kv_heads,
+                              int head_dim,
+                              float rope_theta,
+                              int num_threads) {
+    if (!state || !weights || !chunk || chunk->num_tokens <= 0) return;
+
+    int q_dim = n_heads * head_dim;
+    int kv_dim = n_kv_heads * head_dim;
+    size_t q4_nb = sizeof(block_q4_0) / 32;
+
+    int threads = (num_threads > 0) ? num_threads : g_cpu_topo.num_p_cores;
+    if (threads < 1) threads = 1;
+
+    if (chunk->num_tokens == 1) {
+        /* Single token in chunk: direct multi-threaded GEMV */
+        const float *x = state->xb_chunk;
+        float *q = state->q_chunk;
+        float *k = state->k_chunk;
+        float *v = state->v_chunk;
+
+        if (weights->is_bound_gguf && weights->layer_tensors[layer].attn_q) {
+            noel_gemv_quantized(weights->layer_tensors[layer].attn_q_type, q,
+                                weights->layer_tensors[layer].attn_q, x, q_dim, dim, threads);
+            noel_gemv_quantized(weights->layer_tensors[layer].attn_k_type, k,
+                                weights->layer_tensors[layer].attn_k, x, kv_dim, dim, threads);
+            noel_gemv_quantized(weights->layer_tensors[layer].attn_v_type, v,
+                                weights->layer_tensors[layer].attn_v, x, kv_dim, dim, threads);
+        } else if (weights->wq) {
+            aether_gemv_q4_0(q, weights->wq + layer * q_dim * q4_nb, x, q_dim, dim, threads);
+            aether_gemv_q4_0(k, weights->wk + layer * kv_dim * q4_nb, x, kv_dim, dim, threads);
+            aether_gemv_q4_0(v, weights->wv + layer * kv_dim * q4_nb, x, kv_dim, dim, threads);
+        }
+
+        int pos = chunk->start_pos;
+        aether_rope(q, n_heads, head_dim, pos, rope_theta);
+        aether_rope(k, n_kv_heads, head_dim, pos, rope_theta);
+    } else {
+        /* Multi-token chunk: parallelize across tokens */
+        #pragma omp parallel for schedule(dynamic) num_threads(threads)
+        for (int t = 0; t < chunk->num_tokens; t++) {
+            const float *x = state->xb_chunk + (size_t)t * dim;
+            float *q = state->q_chunk + (size_t)t * q_dim;
+            float *k = state->k_chunk + (size_t)t * kv_dim;
+            float *v = state->v_chunk + (size_t)t * kv_dim;
+
+            if (weights->is_bound_gguf && weights->layer_tensors[layer].attn_q) {
+                noel_gemv_quantized(weights->layer_tensors[layer].attn_q_type, q,
+                                    weights->layer_tensors[layer].attn_q, x, q_dim, dim, 1);
+                noel_gemv_quantized(weights->layer_tensors[layer].attn_k_type, k,
+                                    weights->layer_tensors[layer].attn_k, x, kv_dim, dim, 1);
+                noel_gemv_quantized(weights->layer_tensors[layer].attn_v_type, v,
+                                    weights->layer_tensors[layer].attn_v, x, kv_dim, dim, 1);
+            } else if (weights->wq) {
+                aether_gemv_q4_0(q, weights->wq + layer * q_dim * q4_nb, x, q_dim, dim, 1);
+                aether_gemv_q4_0(k, weights->wk + layer * kv_dim * q4_nb, x, kv_dim, dim, 1);
+                aether_gemv_q4_0(v, weights->wv + layer * kv_dim * q4_nb, x, kv_dim, dim, 1);
+            }
+
+            int pos = chunk->start_pos + t;
+            aether_rope(q, n_heads, head_dim, pos, rope_theta);
+            aether_rope(k, n_kv_heads, head_dim, pos, rope_theta);
+        }
+    }
 }

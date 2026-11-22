@@ -84,6 +84,34 @@ int noel_prefill_calc_num_chunks(int prompt_len, int chunk_size);
  */
 noel_prefill_chunk_t noel_prefill_get_chunk(const int32_t *tokens, int prompt_len, int chunk_size, int chunk_idx);
 
+struct aether_weights_s;
+typedef struct aether_weights_s aether_weights_t;
+
+/**
+ * @brief Compute batched QKV projections and RoPE for a prompt chunk
+ *
+ * @param state Chunk prefill activation buffers
+ * @param weights Transformer model weights
+ * @param layer Current layer index
+ * @param chunk Chunk metadata (tokens, start_pos, num_tokens)
+ * @param dim Model hidden dimension
+ * @param n_heads Number of query heads
+ * @param n_kv_heads Number of key-value heads
+ * @param head_dim Dimension per attention head
+ * @param rope_theta RoPE base frequency
+ * @param num_threads OpenMP thread count
+ */
+void noel_prefill_project_qkv(noel_prefill_state_t *state,
+                              const aether_weights_t *weights,
+                              int layer,
+                              const noel_prefill_chunk_t *chunk,
+                              int dim,
+                              int n_heads,
+                              int n_kv_heads,
+                              int head_dim,
+                              float rope_theta,
+                              int num_threads);
+
 #ifdef __cplusplus
 }
 #endif
