@@ -88,6 +88,30 @@ void noel_speculative_reset_stats(noel_speculative_state_t *state);
  */
 double noel_speculative_get_acceptance_rate(const noel_speculative_state_t *state);
 
+struct aether_engine_s;
+typedef struct aether_engine_s aether_engine_t;
+
+/**
+ * @brief Generate candidate tokens using the draft model
+ *
+ * Runs autoregressive forward generation on the lightweight draft model
+ * to produce `gamma` candidate token proposals and their draft probabilities.
+ *
+ * @param draft_engine Draft model engine
+ * @param spec_state Speculative runtime state
+ * @param current_token Seed token to begin proposal generation
+ * @param current_pos Sequence position for first proposal
+ * @param gamma Number of candidate tokens to propose
+ * @param proposal Output proposal batch
+ * @return Number of tokens proposed (<= gamma)
+ */
+int noel_speculative_propose(aether_engine_t *draft_engine,
+                             noel_speculative_state_t *spec_state,
+                             int32_t current_token,
+                             int current_pos,
+                             int gamma,
+                             noel_speculative_proposal_t *proposal);
+
 #ifdef __cplusplus
 }
 #endif

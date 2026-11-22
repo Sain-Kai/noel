@@ -91,7 +91,7 @@ typedef struct aether_state_s {
 
 typedef bool (*aether_stream_callback_t)(int32_t token_id, const char *piece, void *user_data);
 
-typedef struct {
+typedef struct aether_engine_s {
     aether_config_t config;
     aether_weights_t weights;
     aether_state_t state;
