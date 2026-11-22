@@ -16,6 +16,7 @@
 #include "cgraph.h"
 #include "kv_cache.h"
 #include "prefill.h"
+#include "speculative.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -138,6 +139,15 @@ int aether_engine_generate_stream(aether_engine_t *engine,
                                   float top_p,
                                   aether_stream_callback_t callback,
                                   void *user_data);
+
+/* Speculative streaming generation with dual-engine verification loop */
+int aether_engine_generate_speculative(aether_engine_t *target_engine,
+                                       aether_engine_t *draft_engine,
+                                       const char *prompt,
+                                       int max_gen_tokens,
+                                       const noel_speculative_config_t *spec_cfg,
+                                       aether_stream_callback_t callback,
+                                       void *user_data);
 
 /* Generate a sequence of tokens from a prompt */
 void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max_gen_tokens);

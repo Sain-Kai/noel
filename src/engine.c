@@ -603,6 +603,133 @@ int aether_engine_generate_stream(aether_engine_t *engine,
     return tokens_generated;
 }
 
+int aether_engine_generate_speculative(aether_engine_t *target_engine,
+                                       aether_engine_t *draft_engine,
+                                       const char *prompt,
+                                       int max_gen_tokens,
+                                       const noel_speculative_config_t *spec_cfg,
+                                       aether_stream_callback_t callback,
+                                       void *user_data) {
+    if (!target_engine || !prompt || max_gen_tokens <= 0) return 0;
+    if (!draft_engine || !spec_cfg || spec_cfg->num_speculative_tokens <= 0) {
+        return aether_engine_generate_stream(target_engine, prompt, max_gen_tokens,
+                                             0.7f, 0.9f, callback, user_data);
+    }
+
+    noel_speculative_state_t spec_state;
+    noel_speculative_state_init(&spec_state, spec_cfg->num_speculative_tokens, target_engine->config.vocab_size);
+
+    int32_t prompt_tokens[2048];
+    int n_prompt = aether_tokenizer_encode(&target_engine->tokenizer, prompt, prompt_tokens, 2048);
+    if (n_prompt <= 0) {
+        noel_speculative_state_free(&spec_state);
+        return 0;
+    }
+
+    int pos = target_engine->cur_pos;
+    if (pos + n_prompt + max_gen_tokens >= target_engine->config.seq_len) {
+        aether_engine_apply_attention_sink(target_engine, 4, target_engine->config.seq_len / 2 - 4);
+        aether_engine_apply_attention_sink(draft_engine, 4, draft_engine->config.seq_len / 2 - 4);
+        pos = target_engine->cur_pos;
+        if (pos + n_prompt + max_gen_tokens >= target_engine->config.seq_len) {
+            aether_engine_reset_context(target_engine);
+            aether_engine_reset_context(draft_engine);
+            pos = 0;
+        }
+    }
+
+    /* Prefill prompt tokens across both target and draft engines */
+    for (int i = 0; i < n_prompt - 1; i++) {
+        aether_engine_forward(target_engine, prompt_tokens[i], pos);
+        aether_engine_forward(draft_engine, prompt_tokens[i], pos);
+        pos++;
+    }
+    int32_t current_token = prompt_tokens[n_prompt - 1];
+
+    int tokens_generated = 0;
+    char piece_buf[256];
+    int gamma = spec_cfg->num_speculative_tokens;
+
+    while (tokens_generated < max_gen_tokens) {
+        int cur_gamma = gamma;
+        if (cur_gamma > max_gen_tokens - tokens_generated) {
+            cur_gamma = max_gen_tokens - tokens_generated;
+        }
+        if (cur_gamma <= 0) break;
+
+        noel_speculative_proposal_t proposal;
+        noel_speculative_propose(draft_engine, &spec_state, current_token, pos, cur_gamma, &proposal);
+        noel_speculative_verify(target_engine, &spec_state, pos, &proposal);
+        int accepted = noel_speculative_sample_rejection(target_engine, &spec_state, &proposal);
+
+        bool stop = false;
+        for (int k = 0; k < accepted; k++) {
+            int32_t tok = proposal.tokens[k];
+            tokens_generated++;
+            pos++;
+            current_token = tok;
+
+            const char *piece = aether_tokenizer_decode_piece(&target_engine->tokenizer, tok, piece_buf, sizeof(piece_buf));
+            if (callback && !callback(tok, piece, user_data)) {
+                stop = true;
+                break;
+            }
+            if (tok == target_engine->tokenizer.eos_id) {
+                stop = true;
+                break;
+            }
+        }
+        if (stop) break;
+
+        if (accepted < cur_gamma) {
+            /* Rollback rejected speculative branches */
+            aether_engine_rollback(target_engine, pos);
+            aether_engine_rollback(draft_engine, pos);
+
+            int32_t bonus_tok = proposal.final_sampled_token;
+            if (bonus_tok >= 0 && tokens_generated < max_gen_tokens) {
+                tokens_generated++;
+                aether_engine_forward(target_engine, bonus_tok, pos);
+                aether_engine_forward(draft_engine, bonus_tok, pos);
+                pos++;
+                current_token = bonus_tok;
+
+                const char *piece = aether_tokenizer_decode_piece(&target_engine->tokenizer, bonus_tok, piece_buf, sizeof(piece_buf));
+                if (callback && !callback(bonus_tok, piece, user_data)) {
+                    break;
+                }
+                if (bonus_tok == target_engine->tokenizer.eos_id) {
+                    break;
+                }
+            }
+        } else {
+            /* All proposed candidates accepted; emit bonus token */
+            int32_t bonus_tok = proposal.final_sampled_token;
+            if (bonus_tok >= 0 && tokens_generated < max_gen_tokens) {
+                tokens_generated++;
+                aether_engine_forward(target_engine, bonus_tok, pos);
+                aether_engine_forward(draft_engine, bonus_tok, pos);
+                pos++;
+                current_token = bonus_tok;
+
+                const char *piece = aether_tokenizer_decode_piece(&target_engine->tokenizer, bonus_tok, piece_buf, sizeof(piece_buf));
+                if (callback && !callback(bonus_tok, piece, user_data)) {
+                    break;
+                }
+                if (bonus_tok == target_engine->tokenizer.eos_id) {
+                    break;
+                }
+            }
+        }
+    }
+
+    target_engine->cur_pos = pos;
+    draft_engine->cur_pos = pos;
+    noel_speculative_state_free(&spec_state);
+
+    return tokens_generated;
+}
+
 static bool default_stdout_stream_cb(int32_t token_id, const char *piece, void *user_data) {
     (void)token_id;
     (void)user_data;
