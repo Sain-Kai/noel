@@ -191,6 +191,16 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     /* Compile computation graph IR */
     noel_cgraph_compile(&engine->cgraph, &engine->weights, &engine->config);
 
+    /* Initialize default prompt prefill configuration */
+    noel_prefill_config_init_default(&engine->prefill_cfg);
+
+    /* Initialize optional Quantized KV Cache */
+    if (engine->use_quantized_kv || engine->kv_dtype != NOEL_KV_FP32) {
+        int head_dim = cfg->head_dim > 0 ? cfg->head_dim : (cfg->n_heads > 0 ? cfg->dim / cfg->n_heads : 64);
+        noel_kv_cache_init(&engine->kv_cache, engine->kv_dtype, cfg->n_layers, cfg->seq_len, cfg->n_kv_heads, head_dim);
+        engine->use_quantized_kv = true;
+    }
+
     printf("[Engine] Initialized 4-Tier Pipeline for Dim=%d, Layers=%d, Heads=%d (KV=%d), MoE Experts=%d\n",
            cfg->dim, cfg->n_layers, cfg->n_heads, cfg->n_kv_heads, cfg->n_experts);
     return true;
@@ -257,10 +267,14 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
 
         /* Store K, V in KV-cache */
         if (pos < cfg->seq_len) {
-            float *k_cache_row = s->key_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
-            float *v_cache_row = s->val_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
-            memcpy(k_cache_row, s->k, kv_dim * sizeof(float));
-            memcpy(v_cache_row, s->v, kv_dim * sizeof(float));
+            if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+                noel_kv_cache_store(&engine->kv_cache, l, pos, s->k, s->v);
+            } else {
+                float *k_cache_row = s->key_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
+                float *v_cache_row = s->val_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
+                memcpy(k_cache_row, s->k, kv_dim * sizeof(float));
+                memcpy(v_cache_row, s->v, kv_dim * sizeof(float));
+            }
         }
 
         /* D. COMPUTE-I/O CONCURRENCY OVERLAP:
@@ -273,11 +287,17 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
         }
 
         /* E. Grouped-Query Attention (GQA) with Online Softmax */
-        const float *k_layer = s->key_cache + (size_t)l * cfg->seq_len * kv_dim;
-        const float *v_layer = s->val_cache + (size_t)l * cfg->seq_len * kv_dim;
-        noel_gqa_attention(s->xb2, s->q, k_layer, v_layer,
-                           cfg->n_heads, cfg->n_kv_heads, head_dim,
-                           cfg->seq_len, pos, num_p_threads);
+        if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+            noel_gqa_attention_quantized(s->xb2, s->q, &engine->kv_cache, l,
+                                         cfg->n_heads, cfg->n_kv_heads, head_dim,
+                                         pos, num_p_threads);
+        } else {
+            const float *k_layer = s->key_cache + (size_t)l * cfg->seq_len * kv_dim;
+            const float *v_layer = s->val_cache + (size_t)l * cfg->seq_len * kv_dim;
+            noel_gqa_attention(s->xb2, s->q, k_layer, v_layer,
+                               cfg->n_heads, cfg->n_kv_heads, head_dim,
+                               cfg->seq_len, pos, num_p_threads);
+        }
 
         /* Attention Output Projection: xb = W_o * xb2 */
         if (w->is_bound_gguf && w->layer_tensors[l].attn_output) {
@@ -393,6 +413,25 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
     return best_tok;
 }
 
+int aether_engine_prefill_chunked(aether_engine_t *engine, const int32_t *tokens, int n_tokens, int start_pos) {
+    if (!engine || !tokens || n_tokens <= 0) return start_pos;
+
+    int chunk_size = engine->prefill_cfg.chunk_size > 0 ? engine->prefill_cfg.chunk_size : NOEL_DEFAULT_PREFILL_CHUNK_SIZE;
+    int num_chunks = noel_prefill_calc_num_chunks(n_tokens, chunk_size);
+    int cur_pos = start_pos;
+
+    for (int c = 0; c < num_chunks; c++) {
+        noel_prefill_chunk_t chunk = noel_prefill_get_chunk(tokens, n_tokens, chunk_size, c);
+        chunk.start_pos = cur_pos;
+
+        for (int i = 0; i < chunk.num_tokens; i++) {
+            aether_engine_forward(engine, chunk.tokens[i], cur_pos);
+            cur_pos++;
+        }
+    }
+    return cur_pos;
+}
+
 void aether_engine_reset_context(aether_engine_t *engine) {
     if (!engine) return;
     engine->cur_pos = 0;
@@ -403,6 +442,80 @@ void aether_engine_reset_context(aether_engine_t *engine) {
     if (engine->state.val_cache) {
         memset(engine->state.val_cache, 0, (size_t)engine->config.n_layers * engine->config.seq_len * kv_dim * sizeof(float));
     }
+    if (engine->use_quantized_kv) {
+        noel_kv_cache_reset(&engine->kv_cache);
+    }
+}
+
+void aether_engine_rollback(aether_engine_t *engine, int target_pos) {
+    if (!engine) return;
+    if (target_pos < 0) target_pos = 0;
+    int cur_len = engine->cur_pos;
+    if (target_pos >= cur_len) return;
+
+    size_t kv_dim = (engine->config.dim * engine->config.n_kv_heads) / engine->config.n_heads;
+
+    if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+        noel_kv_cache_rollback(&engine->kv_cache, target_pos, cur_len);
+    } else if (engine->state.key_cache && engine->state.val_cache) {
+        for (int l = 0; l < engine->config.n_layers; l++) {
+            size_t layer_base = (size_t)l * engine->config.seq_len * kv_dim;
+            for (int p = target_pos; p < cur_len; p++) {
+                float *k_p = engine->state.key_cache + layer_base + (size_t)p * kv_dim;
+                float *v_p = engine->state.val_cache + layer_base + (size_t)p * kv_dim;
+                memset(k_p, 0, kv_dim * sizeof(float));
+                memset(v_p, 0, kv_dim * sizeof(float));
+            }
+        }
+    }
+
+    engine->cur_pos = target_pos;
+}
+
+int aether_engine_apply_attention_sink(aether_engine_t *engine, int n_sink, int n_recent) {
+    if (!engine) return 0;
+    if (n_sink < 0) n_sink = 0;
+    if (n_recent < 0) n_recent = 0;
+
+    int cur_len = engine->cur_pos;
+    if (cur_len <= n_sink + n_recent) return cur_len;
+    if (n_sink + n_recent >= engine->config.seq_len) return cur_len;
+
+    int new_len = n_sink + n_recent;
+    size_t kv_dim = (engine->config.dim * engine->config.n_kv_heads) / engine->config.n_heads;
+
+    if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+        new_len = noel_kv_cache_apply_attention_sink(&engine->kv_cache, cur_len, n_sink, n_recent);
+    } else if (engine->state.key_cache && engine->state.val_cache) {
+        for (int l = 0; l < engine->config.n_layers; l++) {
+            size_t layer_base = (size_t)l * engine->config.seq_len * kv_dim;
+
+            /* Shift recent tokens right after sink tokens */
+            for (int j = 0; j < n_recent; j++) {
+                int src_pos = (cur_len - n_recent) + j;
+                int dst_pos = n_sink + j;
+
+                float *k_src = engine->state.key_cache + layer_base + (size_t)src_pos * kv_dim;
+                float *k_dst = engine->state.key_cache + layer_base + (size_t)dst_pos * kv_dim;
+                float *v_src = engine->state.val_cache + layer_base + (size_t)src_pos * kv_dim;
+                float *v_dst = engine->state.val_cache + layer_base + (size_t)dst_pos * kv_dim;
+
+                memmove(k_dst, k_src, kv_dim * sizeof(float));
+                memmove(v_dst, v_src, kv_dim * sizeof(float));
+            }
+
+            /* Clear trailing slots */
+            for (int p = new_len; p < cur_len; p++) {
+                float *k_p = engine->state.key_cache + layer_base + (size_t)p * kv_dim;
+                float *v_p = engine->state.val_cache + layer_base + (size_t)p * kv_dim;
+                memset(k_p, 0, kv_dim * sizeof(float));
+                memset(v_p, 0, kv_dim * sizeof(float));
+            }
+        }
+    }
+
+    engine->cur_pos = new_len;
+    return new_len;
 }
 
 int aether_engine_generate_stream(aether_engine_t *engine,
@@ -423,18 +536,30 @@ int aether_engine_generate_stream(aether_engine_t *engine,
 
     int pos = engine->cur_pos;
     if (pos + n_prompt + max_gen_tokens >= engine->config.seq_len) {
-        /* Rolling context reset if nearing sequence limit */
-        aether_engine_reset_context(engine);
-        pos = 0;
+        /* Rolling context: apply attention sink to preserve initial tokens */
+        int sink_count = 4;
+        int recent_count = engine->config.seq_len / 2 - sink_count;
+        if (recent_count < 1) recent_count = 1;
+        pos = aether_engine_apply_attention_sink(engine, sink_count, recent_count);
+        if (pos + n_prompt + max_gen_tokens >= engine->config.seq_len) {
+            aether_engine_reset_context(engine);
+            pos = 0;
+        }
     }
 
     double t_start = aether_time_sec();
     int32_t tok = prompt_tokens[0];
 
     /* 1. Prompt prefill phase */
-    for (int i = 0; i < n_prompt - 1; i++) {
-        tok = aether_engine_forward(engine, prompt_tokens[i], pos);
-        pos++;
+    if (n_prompt > 1) {
+        if (engine->use_chunked_prefill) {
+            pos = aether_engine_prefill_chunked(engine, prompt_tokens, n_prompt - 1, pos);
+        } else {
+            for (int i = 0; i < n_prompt - 1; i++) {
+                tok = aether_engine_forward(engine, prompt_tokens[i], pos);
+                pos++;
+            }
+        }
     }
     tok = prompt_tokens[n_prompt - 1];
 
@@ -474,6 +599,133 @@ int aether_engine_generate_stream(aether_engine_t *engine,
         engine->stats.tokens_per_sec = (double)(n_prompt + tokens_generated) / total_sec;
     }
     engine->cur_pos = pos;
+
+    return tokens_generated;
+}
+
+int aether_engine_generate_speculative(aether_engine_t *target_engine,
+                                       aether_engine_t *draft_engine,
+                                       const char *prompt,
+                                       int max_gen_tokens,
+                                       const noel_speculative_config_t *spec_cfg,
+                                       aether_stream_callback_t callback,
+                                       void *user_data) {
+    if (!target_engine || !prompt || max_gen_tokens <= 0) return 0;
+    if (!draft_engine || !spec_cfg || spec_cfg->num_speculative_tokens <= 0) {
+        return aether_engine_generate_stream(target_engine, prompt, max_gen_tokens,
+                                             0.7f, 0.9f, callback, user_data);
+    }
+
+    noel_speculative_state_t spec_state;
+    noel_speculative_state_init(&spec_state, spec_cfg->num_speculative_tokens, target_engine->config.vocab_size);
+
+    int32_t prompt_tokens[2048];
+    int n_prompt = aether_tokenizer_encode(&target_engine->tokenizer, prompt, prompt_tokens, 2048);
+    if (n_prompt <= 0) {
+        noel_speculative_state_free(&spec_state);
+        return 0;
+    }
+
+    int pos = target_engine->cur_pos;
+    if (pos + n_prompt + max_gen_tokens >= target_engine->config.seq_len) {
+        aether_engine_apply_attention_sink(target_engine, 4, target_engine->config.seq_len / 2 - 4);
+        aether_engine_apply_attention_sink(draft_engine, 4, draft_engine->config.seq_len / 2 - 4);
+        pos = target_engine->cur_pos;
+        if (pos + n_prompt + max_gen_tokens >= target_engine->config.seq_len) {
+            aether_engine_reset_context(target_engine);
+            aether_engine_reset_context(draft_engine);
+            pos = 0;
+        }
+    }
+
+    /* Prefill prompt tokens across both target and draft engines */
+    for (int i = 0; i < n_prompt - 1; i++) {
+        aether_engine_forward(target_engine, prompt_tokens[i], pos);
+        aether_engine_forward(draft_engine, prompt_tokens[i], pos);
+        pos++;
+    }
+    int32_t current_token = prompt_tokens[n_prompt - 1];
+
+    int tokens_generated = 0;
+    char piece_buf[256];
+    int gamma = spec_cfg->num_speculative_tokens;
+
+    while (tokens_generated < max_gen_tokens) {
+        int cur_gamma = gamma;
+        if (cur_gamma > max_gen_tokens - tokens_generated) {
+            cur_gamma = max_gen_tokens - tokens_generated;
+        }
+        if (cur_gamma <= 0) break;
+
+        noel_speculative_proposal_t proposal;
+        noel_speculative_propose(draft_engine, &spec_state, current_token, pos, cur_gamma, &proposal);
+        noel_speculative_verify(target_engine, &spec_state, pos, &proposal);
+        int accepted = noel_speculative_sample_rejection(target_engine, &spec_state, &proposal);
+
+        bool stop = false;
+        for (int k = 0; k < accepted; k++) {
+            int32_t tok = proposal.tokens[k];
+            tokens_generated++;
+            pos++;
+            current_token = tok;
+
+            const char *piece = aether_tokenizer_decode_piece(&target_engine->tokenizer, tok, piece_buf, sizeof(piece_buf));
+            if (callback && !callback(tok, piece, user_data)) {
+                stop = true;
+                break;
+            }
+            if (tok == target_engine->tokenizer.eos_id) {
+                stop = true;
+                break;
+            }
+        }
+        if (stop) break;
+
+        if (accepted < cur_gamma) {
+            /* Rollback rejected speculative branches */
+            aether_engine_rollback(target_engine, pos);
+            aether_engine_rollback(draft_engine, pos);
+
+            int32_t bonus_tok = proposal.final_sampled_token;
+            if (bonus_tok >= 0 && tokens_generated < max_gen_tokens) {
+                tokens_generated++;
+                aether_engine_forward(target_engine, bonus_tok, pos);
+                aether_engine_forward(draft_engine, bonus_tok, pos);
+                pos++;
+                current_token = bonus_tok;
+
+                const char *piece = aether_tokenizer_decode_piece(&target_engine->tokenizer, bonus_tok, piece_buf, sizeof(piece_buf));
+                if (callback && !callback(bonus_tok, piece, user_data)) {
+                    break;
+                }
+                if (bonus_tok == target_engine->tokenizer.eos_id) {
+                    break;
+                }
+            }
+        } else {
+            /* All proposed candidates accepted; emit bonus token */
+            int32_t bonus_tok = proposal.final_sampled_token;
+            if (bonus_tok >= 0 && tokens_generated < max_gen_tokens) {
+                tokens_generated++;
+                aether_engine_forward(target_engine, bonus_tok, pos);
+                aether_engine_forward(draft_engine, bonus_tok, pos);
+                pos++;
+                current_token = bonus_tok;
+
+                const char *piece = aether_tokenizer_decode_piece(&target_engine->tokenizer, bonus_tok, piece_buf, sizeof(piece_buf));
+                if (callback && !callback(bonus_tok, piece, user_data)) {
+                    break;
+                }
+                if (bonus_tok == target_engine->tokenizer.eos_id) {
+                    break;
+                }
+            }
+        }
+    }
+
+    target_engine->cur_pos = pos;
+    draft_engine->cur_pos = pos;
+    noel_speculative_state_free(&spec_state);
 
     return tokens_generated;
 }
@@ -548,4 +800,7 @@ void aether_engine_shutdown(aether_engine_t *engine) {
     aether_tokenizer_free(&engine->tokenizer);
     noel_sampler_free(&engine->sampler);
     noel_cgraph_free(&engine->cgraph);
+    if (engine->use_quantized_kv) {
+        noel_kv_cache_free(&engine->kv_cache);
+    }
 }

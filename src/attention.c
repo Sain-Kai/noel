@@ -1,4 +1,5 @@
 #include "attention.h"
+#include "kv_cache.h"
 #include <immintrin.h>
 #include <math.h>
 #include <string.h>
@@ -129,6 +130,72 @@ void noel_gqa_attention(float *out,
 
         if (heap_allocated) {
             free(acc);
+        }
+    }
+}
+
+void noel_gqa_attention_quantized(float *out,
+                                  const float *q,
+                                  const struct noel_kv_cache_s *cache,
+                                  int layer_idx,
+                                  int n_heads,
+                                  int n_kv_heads,
+                                  int head_dim,
+                                  int pos,
+                                  int n_threads) {
+    if (!out || !q || !cache || layer_idx < 0 || layer_idx >= cache->n_layers) return;
+    if (n_heads <= 0 || n_kv_heads <= 0 || head_dim <= 0 || pos < 0) return;
+
+    if (cache->dtype == NOEL_KV_FP32) {
+        const float *k_layer = (const float *)cache->k_data + (size_t)layer_idx * cache->seq_len * cache->kv_dim;
+        const float *v_layer = (const float *)cache->v_data + (size_t)layer_idx * cache->seq_len * cache->kv_dim;
+        noel_gqa_attention(out, q, k_layer, v_layer, n_heads, n_kv_heads, head_dim, cache->seq_len, pos, n_threads);
+        return;
+    }
+
+    int max_t = (pos < cache->seq_len) ? pos : (cache->seq_len - 1);
+    int group_size = n_heads / n_kv_heads;
+    if (group_size < 1) group_size = 1;
+    float scale = 1.0f / sqrtf((float)head_dim);
+    if (n_threads < 1) n_threads = 1;
+
+    #pragma omp parallel for num_threads(n_threads) schedule(static)
+    for (int h = 0; h < n_heads; h++) {
+        int kv_head = h / group_size;
+        if (kv_head >= n_kv_heads) kv_head = n_kv_heads - 1;
+
+        const float *q_h = q + h * head_dim;
+        float *out_h = out + h * head_dim;
+
+        float acc[512] = {0};
+        float k_buf[512];
+        float v_buf[512];
+        float max_score = -1e30f;
+        float sum_exp = 0.0f;
+
+        for (int t = 0; t <= max_t; t++) {
+            noel_kv_cache_load(cache, layer_idx, t, k_buf, v_buf);
+
+            const float *k_t = k_buf + kv_head * head_dim;
+            const float *v_t = v_buf + kv_head * head_dim;
+
+            float score = noel_vec_dot_f32_avx2(q_h, k_t, head_dim) * scale;
+
+            if (score > max_score) {
+                float factor = expf(max_score - score);
+                max_score = score;
+                sum_exp = sum_exp * factor + 1.0f;
+                vec_scale_add_f32_avx2(acc, factor, v_t, head_dim);
+            } else {
+                float weight = expf(score - max_score);
+                sum_exp += weight;
+                vec_add_weighted_f32_avx2(acc, weight, v_t, head_dim);
+            }
+        }
+
+        float inv_sum = (sum_exp > 1e-9f) ? (1.0f / sum_exp) : 0.0f;
+        for (int d = 0; d < head_dim; d++) {
+            out_h[d] = acc[d] * inv_sum;
         }
     }
 }

@@ -39,6 +39,21 @@ void noel_gqa_attention(float *out,
  */
 float noel_vec_dot_f32_avx2(const float *a, const float *b, int dim);
 
+struct noel_kv_cache_s;
+
+/**
+ * Grouped-Query Attention (GQA) with vectorized online softmax on quantized KV cache.
+ */
+void noel_gqa_attention_quantized(float *out,
+                                  const float *q,
+                                  const struct noel_kv_cache_s *cache,
+                                  int layer_idx,
+                                  int n_heads,
+                                  int n_kv_heads,
+                                  int head_dim,
+                                  int pos,
+                                  int n_threads);
+
 #ifdef __cplusplus
 }
 #endif

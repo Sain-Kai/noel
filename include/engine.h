@@ -14,6 +14,9 @@
 #include "attention.h"
 #include "sampler.h"
 #include "cgraph.h"
+#include "kv_cache.h"
+#include "prefill.h"
+#include "speculative.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,7 +92,7 @@ typedef struct aether_state_s {
 
 typedef bool (*aether_stream_callback_t)(int32_t token_id, const char *piece, void *user_data);
 
-typedef struct {
+typedef struct aether_engine_s {
     aether_config_t config;
     aether_weights_t weights;
     aether_state_t state;
@@ -100,6 +103,11 @@ typedef struct {
     noel_sampler_t sampler;
     noel_sampler_config_t sampler_cfg;
     noel_cgraph_t cgraph;
+    noel_kv_cache_t kv_cache;
+    noel_kv_dtype_t kv_dtype;
+    bool use_quantized_kv;
+    noel_prefill_config_t prefill_cfg;
+    bool use_chunked_prefill;
     int cur_pos;               /* Persistent position in KV cache across conversational turns */
     bool is_gguf_loaded;
     bool has_gpu;
@@ -111,8 +119,17 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
 /* Reset context window and KV cache to position 0 */
 void aether_engine_reset_context(aether_engine_t *engine);
 
+/* Rollback KV cache and sequence position to target position */
+void aether_engine_rollback(aether_engine_t *engine, int target_pos);
+
+/* Apply StreamingLLM attention sink and context window rolling */
+int aether_engine_apply_attention_sink(aether_engine_t *engine, int n_sink, int n_recent);
+
 /* Generate next token given previous token ID and position */
 int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos);
+
+/* Prefill prompt tokens using chunked batch partitioning */
+int aether_engine_prefill_chunked(aether_engine_t *engine, const int32_t *tokens, int n_tokens, int start_pos);
 
 /* Real-time streaming generation with callback and persistent KV cache */
 int aether_engine_generate_stream(aether_engine_t *engine,
@@ -122,6 +139,15 @@ int aether_engine_generate_stream(aether_engine_t *engine,
                                   float top_p,
                                   aether_stream_callback_t callback,
                                   void *user_data);
+
+/* Speculative streaming generation with dual-engine verification loop */
+int aether_engine_generate_speculative(aether_engine_t *target_engine,
+                                       aether_engine_t *draft_engine,
+                                       const char *prompt,
+                                       int max_gen_tokens,
+                                       const noel_speculative_config_t *spec_cfg,
+                                       aether_stream_callback_t callback,
+                                       void *user_data);
 
 /* Generate a sequence of tokens from a prompt */
 void aether_engine_generate(aether_engine_t *engine, const char *prompt, int max_gen_tokens);
