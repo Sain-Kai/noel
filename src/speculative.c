@@ -126,3 +126,28 @@ int noel_speculative_propose(aether_engine_t *draft_engine,
 
     return gamma;
 }
+
+int noel_speculative_verify(aether_engine_t *target_engine,
+                            noel_speculative_state_t *spec_state,
+                            int start_pos,
+                            noel_speculative_proposal_t *proposal) {
+    if (!target_engine || !proposal || proposal->num_proposed <= 0) return 0;
+    (void)spec_state;
+
+    int vocab_size = target_engine->config.vocab_size;
+    float temp = target_engine->sampler.config.temperature;
+
+    for (int i = 0; i < proposal->num_proposed; i++) {
+        int pos = start_pos + i;
+        int32_t cand_tok = proposal->tokens[i];
+
+        /* Run target model forward pass */
+        aether_engine_forward(target_engine, cand_tok, pos);
+
+        /* Evaluate target model probability for this token */
+        float target_p = noel_calc_token_prob(target_engine->state.logits, vocab_size, cand_tok, temp);
+        proposal->target_probs[i] = target_p;
+    }
+
+    return proposal->num_proposed;
+}

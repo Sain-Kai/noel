@@ -112,6 +112,23 @@ int noel_speculative_propose(aether_engine_t *draft_engine,
                              int gamma,
                              noel_speculative_proposal_t *proposal);
 
+/**
+ * @brief Run target model verification pass over proposed draft tokens
+ *
+ * Evaluates candidate tokens through the target model forward pass,
+ * computing target probability distributions for each proposal step.
+ *
+ * @param target_engine High-capacity target model engine
+ * @param spec_state Speculative runtime state
+ * @param start_pos Sequence position corresponding to first candidate token
+ * @param proposal Proposal batch containing proposed candidate tokens
+ * @return Number of tokens verified
+ */
+int noel_speculative_verify(aether_engine_t *target_engine,
+                            noel_speculative_state_t *spec_state,
+                            int start_pos,
+                            noel_speculative_proposal_t *proposal);
+
 #ifdef __cplusplus
 }
 #endif
