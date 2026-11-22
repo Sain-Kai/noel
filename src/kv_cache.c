@@ -553,3 +553,32 @@ int noel_kv_cache_apply_attention_sink(noel_kv_cache_t *cache, int current_len, 
 
     return new_len;
 }
+
+void noel_kv_cache_rollback(noel_kv_cache_t *cache, int target_pos, int current_pos) {
+    if (!cache || !cache->k_data || !cache->v_data) return;
+    if (target_pos < 0) target_pos = 0;
+    if (target_pos >= current_pos) return;
+    if (current_pos > cache->seq_len) current_pos = cache->seq_len;
+
+    size_t row_bytes = cache->row_bytes;
+    int n_heads = cache->n_kv_heads;
+
+    for (int l = 0; l < cache->n_layers; l++) {
+        size_t layer_base = (size_t)l * cache->seq_len;
+
+        for (int p = target_pos; p < current_pos; p++) {
+            size_t p_idx = layer_base + p;
+            uint8_t *k_p = (uint8_t *)cache->k_data + p_idx * row_bytes;
+            uint8_t *v_p = (uint8_t *)cache->v_data + p_idx * row_bytes;
+            memset(k_p, 0, row_bytes);
+            memset(v_p, 0, row_bytes);
+
+            if (cache->k_scales && cache->v_scales) {
+                float *k_sc_p = cache->k_scales + p_idx * n_heads;
+                float *v_sc_p = cache->v_scales + p_idx * n_heads;
+                memset(k_sc_p, 0, n_heads * sizeof(float));
+                memset(v_sc_p, 0, n_heads * sizeof(float));
+            }
+        }
+    }
+}

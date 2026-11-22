@@ -447,6 +447,31 @@ void aether_engine_reset_context(aether_engine_t *engine) {
     }
 }
 
+void aether_engine_rollback(aether_engine_t *engine, int target_pos) {
+    if (!engine) return;
+    if (target_pos < 0) target_pos = 0;
+    int cur_len = engine->cur_pos;
+    if (target_pos >= cur_len) return;
+
+    size_t kv_dim = (engine->config.dim * engine->config.n_kv_heads) / engine->config.n_heads;
+
+    if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+        noel_kv_cache_rollback(&engine->kv_cache, target_pos, cur_len);
+    } else if (engine->state.key_cache && engine->state.val_cache) {
+        for (int l = 0; l < engine->config.n_layers; l++) {
+            size_t layer_base = (size_t)l * engine->config.seq_len * kv_dim;
+            for (int p = target_pos; p < cur_len; p++) {
+                float *k_p = engine->state.key_cache + layer_base + (size_t)p * kv_dim;
+                float *v_p = engine->state.val_cache + layer_base + (size_t)p * kv_dim;
+                memset(k_p, 0, kv_dim * sizeof(float));
+                memset(v_p, 0, kv_dim * sizeof(float));
+            }
+        }
+    }
+
+    engine->cur_pos = target_pos;
+}
+
 int aether_engine_apply_attention_sink(aether_engine_t *engine, int n_sink, int n_recent) {
     if (!engine) return 0;
     if (n_sink < 0) n_sink = 0;

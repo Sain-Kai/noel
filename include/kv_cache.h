@@ -61,6 +61,18 @@ void noel_kv_cache_reset(noel_kv_cache_t *cache);
  */
 int noel_kv_cache_apply_attention_sink(noel_kv_cache_t *cache, int current_len, int n_sink, int n_recent);
 
+/**
+ * @brief Transactionally rollback KV cache to target position
+ *
+ * Zeroes out and invalidates speculative cache entries between `target_pos`
+ * and `current_pos - 1` across all layers.
+ *
+ * @param cache KV cache pointer
+ * @param target_pos Destination sequence position to rollback to
+ * @param current_pos Current sequence position before rollback
+ */
+void noel_kv_cache_rollback(noel_kv_cache_t *cache, int target_pos, int current_pos);
+
 const char *noel_kv_dtype_name(noel_kv_dtype_t dtype);
 size_t noel_kv_dtype_row_bytes(noel_kv_dtype_t dtype, int kv_dim);
 double noel_kv_cache_compression_ratio(const noel_kv_cache_t *cache);
