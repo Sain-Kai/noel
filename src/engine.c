@@ -447,6 +447,52 @@ void aether_engine_reset_context(aether_engine_t *engine) {
     }
 }
 
+int aether_engine_apply_attention_sink(aether_engine_t *engine, int n_sink, int n_recent) {
+    if (!engine) return 0;
+    if (n_sink < 0) n_sink = 0;
+    if (n_recent < 0) n_recent = 0;
+
+    int cur_len = engine->cur_pos;
+    if (cur_len <= n_sink + n_recent) return cur_len;
+    if (n_sink + n_recent >= engine->config.seq_len) return cur_len;
+
+    int new_len = n_sink + n_recent;
+    size_t kv_dim = (engine->config.dim * engine->config.n_kv_heads) / engine->config.n_heads;
+
+    if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+        new_len = noel_kv_cache_apply_attention_sink(&engine->kv_cache, cur_len, n_sink, n_recent);
+    } else if (engine->state.key_cache && engine->state.val_cache) {
+        for (int l = 0; l < engine->config.n_layers; l++) {
+            size_t layer_base = (size_t)l * engine->config.seq_len * kv_dim;
+
+            /* Shift recent tokens right after sink tokens */
+            for (int j = 0; j < n_recent; j++) {
+                int src_pos = (cur_len - n_recent) + j;
+                int dst_pos = n_sink + j;
+
+                float *k_src = engine->state.key_cache + layer_base + (size_t)src_pos * kv_dim;
+                float *k_dst = engine->state.key_cache + layer_base + (size_t)dst_pos * kv_dim;
+                float *v_src = engine->state.val_cache + layer_base + (size_t)src_pos * kv_dim;
+                float *v_dst = engine->state.val_cache + layer_base + (size_t)dst_pos * kv_dim;
+
+                memmove(k_dst, k_src, kv_dim * sizeof(float));
+                memmove(v_dst, v_src, kv_dim * sizeof(float));
+            }
+
+            /* Clear trailing slots */
+            for (int p = new_len; p < cur_len; p++) {
+                float *k_p = engine->state.key_cache + layer_base + (size_t)p * kv_dim;
+                float *v_p = engine->state.val_cache + layer_base + (size_t)p * kv_dim;
+                memset(k_p, 0, kv_dim * sizeof(float));
+                memset(v_p, 0, kv_dim * sizeof(float));
+            }
+        }
+    }
+
+    engine->cur_pos = new_len;
+    return new_len;
+}
+
 int aether_engine_generate_stream(aether_engine_t *engine,
                                   const char *prompt,
                                   int max_gen_tokens,
@@ -465,9 +511,15 @@ int aether_engine_generate_stream(aether_engine_t *engine,
 
     int pos = engine->cur_pos;
     if (pos + n_prompt + max_gen_tokens >= engine->config.seq_len) {
-        /* Rolling context reset if nearing sequence limit */
-        aether_engine_reset_context(engine);
-        pos = 0;
+        /* Rolling context: apply attention sink to preserve initial tokens */
+        int sink_count = 4;
+        int recent_count = engine->config.seq_len / 2 - sink_count;
+        if (recent_count < 1) recent_count = 1;
+        pos = aether_engine_apply_attention_sink(engine, sink_count, recent_count);
+        if (pos + n_prompt + max_gen_tokens >= engine->config.seq_len) {
+            aether_engine_reset_context(engine);
+            pos = 0;
+        }
     }
 
     double t_start = aether_time_sec();

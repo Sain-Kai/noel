@@ -118,6 +118,9 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
 /* Reset context window and KV cache to position 0 */
 void aether_engine_reset_context(aether_engine_t *engine);
 
+/* Apply StreamingLLM attention sink and context window rolling */
+int aether_engine_apply_attention_sink(aether_engine_t *engine, int n_sink, int n_recent);
+
 /* Generate next token given previous token ID and position */
 int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos);
 

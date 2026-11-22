@@ -47,6 +47,20 @@ int noel_kv_cache_init(noel_kv_cache_t *cache,
 void noel_kv_cache_free(noel_kv_cache_t *cache);
 void noel_kv_cache_reset(noel_kv_cache_t *cache);
 
+/**
+ * @brief Apply StreamingLLM attention sinks and rolling sliding window
+ *
+ * Preserves the first `n_sink` tokens and shifts the latest `n_recent`
+ * tokens, discarding intermediate obsolete context to prevent perplexity collapse.
+ *
+ * @param cache KV cache pointer
+ * @param current_len Current sequence length in the cache
+ * @param n_sink Number of initial sink tokens to preserve (typically 2-4)
+ * @param n_recent Number of recent sliding-window tokens to retain
+ * @return New sequence position (n_sink + n_recent) or current_len if no roll occurred
+ */
+int noel_kv_cache_apply_attention_sink(noel_kv_cache_t *cache, int current_len, int n_sink, int n_recent);
+
 const char *noel_kv_dtype_name(noel_kv_dtype_t dtype);
 size_t noel_kv_dtype_row_bytes(noel_kv_dtype_t dtype, int kv_dim);
 double noel_kv_cache_compression_ratio(const noel_kv_cache_t *cache);

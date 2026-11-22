@@ -489,3 +489,67 @@ void noel_kv_cache_load(const noel_kv_cache_t *cache, int layer, int pos, float 
         }
     }
 }
+
+int noel_kv_cache_apply_attention_sink(noel_kv_cache_t *cache, int current_len, int n_sink, int n_recent) {
+    if (!cache || !cache->k_data || !cache->v_data) return current_len;
+    if (n_sink < 0) n_sink = 0;
+    if (n_recent < 0) n_recent = 0;
+    if (current_len <= n_sink + n_recent) return current_len;
+    if (n_sink + n_recent >= cache->seq_len) return current_len;
+
+    int new_len = n_sink + n_recent;
+    int discard_count = current_len - new_len;
+    if (discard_count <= 0) return current_len;
+
+    size_t row_bytes = cache->row_bytes;
+    int n_heads = cache->n_kv_heads;
+
+    for (int l = 0; l < cache->n_layers; l++) {
+        size_t layer_base = (size_t)l * cache->seq_len;
+
+        /* Move the recent tokens right after the sink tokens */
+        for (int j = 0; j < n_recent; j++) {
+            int src_pos = (current_len - n_recent) + j;
+            int dst_pos = n_sink + j;
+
+            size_t src_idx = layer_base + src_pos;
+            size_t dst_idx = layer_base + dst_pos;
+
+            uint8_t *k_src = (uint8_t *)cache->k_data + src_idx * row_bytes;
+            uint8_t *k_dst = (uint8_t *)cache->k_data + dst_idx * row_bytes;
+            uint8_t *v_src = (uint8_t *)cache->v_data + src_idx * row_bytes;
+            uint8_t *v_dst = (uint8_t *)cache->v_data + dst_idx * row_bytes;
+
+            memmove(k_dst, k_src, row_bytes);
+            memmove(v_dst, v_src, row_bytes);
+
+            if (cache->k_scales && cache->v_scales) {
+                float *k_sc_src = cache->k_scales + src_idx * n_heads;
+                float *k_sc_dst = cache->k_scales + dst_idx * n_heads;
+                float *v_sc_src = cache->v_scales + src_idx * n_heads;
+                float *v_sc_dst = cache->v_scales + dst_idx * n_heads;
+
+                memmove(k_sc_dst, k_sc_src, n_heads * sizeof(float));
+                memmove(v_sc_dst, v_sc_src, n_heads * sizeof(float));
+            }
+        }
+
+        /* Clear out vacated trailing slots */
+        for (int p = new_len; p < current_len; p++) {
+            size_t p_idx = layer_base + p;
+            uint8_t *k_p = (uint8_t *)cache->k_data + p_idx * row_bytes;
+            uint8_t *v_p = (uint8_t *)cache->v_data + p_idx * row_bytes;
+            memset(k_p, 0, row_bytes);
+            memset(v_p, 0, row_bytes);
+
+            if (cache->k_scales && cache->v_scales) {
+                float *k_sc_p = cache->k_scales + p_idx * n_heads;
+                float *v_sc_p = cache->v_scales + p_idx * n_heads;
+                memset(k_sc_p, 0, n_heads * sizeof(float));
+                memset(v_sc_p, 0, n_heads * sizeof(float));
+            }
+        }
+    }
+
+    return new_len;
+}
