@@ -15,6 +15,7 @@
 #include "sampler.h"
 #include "cgraph.h"
 #include "kv_cache.h"
+#include "prefill.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,6 +105,8 @@ typedef struct {
     noel_kv_cache_t kv_cache;
     noel_kv_dtype_t kv_dtype;
     bool use_quantized_kv;
+    noel_prefill_config_t prefill_cfg;
+    bool use_chunked_prefill;
     int cur_pos;               /* Persistent position in KV cache across conversational turns */
     bool is_gguf_loaded;
     bool has_gpu;
@@ -117,6 +120,9 @@ void aether_engine_reset_context(aether_engine_t *engine);
 
 /* Generate next token given previous token ID and position */
 int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos);
+
+/* Prefill prompt tokens using chunked batch partitioning */
+int aether_engine_prefill_chunked(aether_engine_t *engine, const int32_t *tokens, int n_tokens, int start_pos);
 
 /* Real-time streaming generation with callback and persistent KV cache */
 int aether_engine_generate_stream(aether_engine_t *engine,

@@ -191,6 +191,9 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     /* Compile computation graph IR */
     noel_cgraph_compile(&engine->cgraph, &engine->weights, &engine->config);
 
+    /* Initialize default prompt prefill configuration */
+    noel_prefill_config_init_default(&engine->prefill_cfg);
+
     /* Initialize optional Quantized KV Cache */
     if (engine->use_quantized_kv || engine->kv_dtype != NOEL_KV_FP32) {
         int head_dim = cfg->head_dim > 0 ? cfg->head_dim : (cfg->n_heads > 0 ? cfg->dim / cfg->n_heads : 64);
@@ -410,6 +413,25 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
     return best_tok;
 }
 
+int aether_engine_prefill_chunked(aether_engine_t *engine, const int32_t *tokens, int n_tokens, int start_pos) {
+    if (!engine || !tokens || n_tokens <= 0) return start_pos;
+
+    int chunk_size = engine->prefill_cfg.chunk_size > 0 ? engine->prefill_cfg.chunk_size : NOEL_DEFAULT_PREFILL_CHUNK_SIZE;
+    int num_chunks = noel_prefill_calc_num_chunks(n_tokens, chunk_size);
+    int cur_pos = start_pos;
+
+    for (int c = 0; c < num_chunks; c++) {
+        noel_prefill_chunk_t chunk = noel_prefill_get_chunk(tokens, n_tokens, chunk_size, c);
+        chunk.start_pos = cur_pos;
+
+        for (int i = 0; i < chunk.num_tokens; i++) {
+            aether_engine_forward(engine, chunk.tokens[i], cur_pos);
+            cur_pos++;
+        }
+    }
+    return cur_pos;
+}
+
 void aether_engine_reset_context(aether_engine_t *engine) {
     if (!engine) return;
     engine->cur_pos = 0;
@@ -452,9 +474,15 @@ int aether_engine_generate_stream(aether_engine_t *engine,
     int32_t tok = prompt_tokens[0];
 
     /* 1. Prompt prefill phase */
-    for (int i = 0; i < n_prompt - 1; i++) {
-        tok = aether_engine_forward(engine, prompt_tokens[i], pos);
-        pos++;
+    if (n_prompt > 1) {
+        if (engine->use_chunked_prefill) {
+            pos = aether_engine_prefill_chunked(engine, prompt_tokens, n_prompt - 1, pos);
+        } else {
+            for (int i = 0; i < n_prompt - 1; i++) {
+                tok = aether_engine_forward(engine, prompt_tokens[i], pos);
+                pos++;
+            }
+        }
     }
     tok = prompt_tokens[n_prompt - 1];
 
