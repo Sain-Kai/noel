@@ -129,6 +129,23 @@ int noel_speculative_verify(aether_engine_t *target_engine,
                             int start_pos,
                             noel_speculative_proposal_t *proposal);
 
+/**
+ * @brief Perform stochastic rejection sampling with residual distribution recovery
+ *
+ * Implements the Leviathan et al. (2023) rejection sampling algorithm:
+ * Accepts candidates with probability min(1, P_t(x) / P_d(x)).
+ * Upon rejection, recovers and samples from the residual distribution
+ * max(0, P_t - P_d), ensuring exact mathematical alignment with the target model.
+ *
+ * @param target_engine Target engine containing verification logits
+ * @param spec_state Speculative runtime state with scratch distributions
+ * @param proposal Proposal batch with candidate tokens and probabilities
+ * @return Total number of accepted draft tokens
+ */
+int noel_speculative_sample_rejection(aether_engine_t *target_engine,
+                                      noel_speculative_state_t *spec_state,
+                                      noel_speculative_proposal_t *proposal);
+
 #ifdef __cplusplus
 }
 #endif

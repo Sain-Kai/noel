@@ -151,3 +151,94 @@ int noel_speculative_verify(aether_engine_t *target_engine,
 
     return proposal->num_proposed;
 }
+
+static int32_t noel_sample_from_dist(const float *dist, int vocab_size) {
+    float r = (float)rand() / (float)RAND_MAX;
+    float cdf = 0.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        cdf += dist[i];
+        if (r <= cdf) {
+            return i;
+        }
+    }
+    return vocab_size - 1;
+}
+
+int noel_speculative_sample_rejection(aether_engine_t *target_engine,
+                                      noel_speculative_state_t *spec_state,
+                                      noel_speculative_proposal_t *proposal) {
+    if (!proposal || proposal->num_proposed <= 0) return 0;
+
+    int vocab_size = target_engine ? target_engine->config.vocab_size : 32000;
+    proposal->accepted_count = 0;
+    proposal->final_sampled_token = -1;
+
+    for (int i = 0; i < proposal->num_proposed; i++) {
+        float p_d = proposal->draft_probs[i];
+        float p_t = proposal->target_probs[i];
+
+        float alpha = 1.0f;
+        if (p_d > 1e-8f) {
+            alpha = p_t / p_d;
+            if (alpha > 1.0f) alpha = 1.0f;
+        }
+
+        float r = (float)rand() / (float)RAND_MAX;
+        if (r < alpha) {
+            /* Token accepted */
+            proposal->accepted_count++;
+        } else {
+            /* Rejection: recover residual distribution max(0, P_t - P_d) */
+            if (target_engine && spec_state && spec_state->residual_dist) {
+                float temp = target_engine->sampler.config.temperature;
+                if (temp <= 0.01f) temp = 1.0f;
+
+                /* Compute full target softmax distribution */
+                float max_l = target_engine->state.logits[0] / temp;
+                for (int v = 1; v < vocab_size; v++) {
+                    float val = target_engine->state.logits[v] / temp;
+                    if (val > max_l) max_l = val;
+                }
+                float sum_exp = 0.0f;
+                for (int v = 0; v < vocab_size; v++) {
+                    float exp_val = expf(target_engine->state.logits[v] / temp - max_l);
+                    spec_state->target_dist[v] = exp_val;
+                    sum_exp += exp_val;
+                }
+
+                float sum_residual = 0.0f;
+                for (int v = 0; v < vocab_size; v++) {
+                    float pt = spec_state->target_dist[v] / sum_exp;
+                    float pd = (v == proposal->tokens[i]) ? p_d : 0.0f;
+                    float diff = pt - pd;
+                    if (diff < 0.0f) diff = 0.0f;
+                    spec_state->residual_dist[v] = diff;
+                    sum_residual += diff;
+                }
+
+                if (sum_residual > 1e-8f) {
+                    for (int v = 0; v < vocab_size; v++) {
+                        spec_state->residual_dist[v] /= sum_residual;
+                    }
+                    proposal->final_sampled_token = noel_sample_from_dist(spec_state->residual_dist, vocab_size);
+                } else {
+                    proposal->final_sampled_token = noel_sampler_sample(&target_engine->sampler, target_engine->state.logits, vocab_size, NULL, 0);
+                }
+            } else if (target_engine) {
+                proposal->final_sampled_token = noel_sampler_sample(&target_engine->sampler, target_engine->state.logits, vocab_size, NULL, 0);
+            }
+            break;
+        }
+    }
+
+    /* If all candidates accepted, sample bonus token from target engine's final logits */
+    if (proposal->accepted_count == proposal->num_proposed && target_engine) {
+        proposal->final_sampled_token = noel_sampler_sample(&target_engine->sampler, target_engine->state.logits, vocab_size, NULL, 0);
+    }
+
+    if (spec_state) {
+        spec_state->accepted_draft_tokens += proposal->accepted_count;
+    }
+
+    return proposal->accepted_count;
+}
