@@ -191,6 +191,13 @@ bool aether_engine_init(aether_engine_t *engine, const aether_config_t *cfg, con
     /* Compile computation graph IR */
     noel_cgraph_compile(&engine->cgraph, &engine->weights, &engine->config);
 
+    /* Initialize optional Quantized KV Cache */
+    if (engine->use_quantized_kv || engine->kv_dtype != NOEL_KV_FP32) {
+        int head_dim = cfg->head_dim > 0 ? cfg->head_dim : (cfg->n_heads > 0 ? cfg->dim / cfg->n_heads : 64);
+        noel_kv_cache_init(&engine->kv_cache, engine->kv_dtype, cfg->n_layers, cfg->seq_len, cfg->n_kv_heads, head_dim);
+        engine->use_quantized_kv = true;
+    }
+
     printf("[Engine] Initialized 4-Tier Pipeline for Dim=%d, Layers=%d, Heads=%d (KV=%d), MoE Experts=%d\n",
            cfg->dim, cfg->n_layers, cfg->n_heads, cfg->n_kv_heads, cfg->n_experts);
     return true;
@@ -257,10 +264,14 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
 
         /* Store K, V in KV-cache */
         if (pos < cfg->seq_len) {
-            float *k_cache_row = s->key_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
-            float *v_cache_row = s->val_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
-            memcpy(k_cache_row, s->k, kv_dim * sizeof(float));
-            memcpy(v_cache_row, s->v, kv_dim * sizeof(float));
+            if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+                noel_kv_cache_store(&engine->kv_cache, l, pos, s->k, s->v);
+            } else {
+                float *k_cache_row = s->key_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
+                float *v_cache_row = s->val_cache + ((size_t)l * cfg->seq_len + pos) * kv_dim;
+                memcpy(k_cache_row, s->k, kv_dim * sizeof(float));
+                memcpy(v_cache_row, s->v, kv_dim * sizeof(float));
+            }
         }
 
         /* D. COMPUTE-I/O CONCURRENCY OVERLAP:
@@ -273,11 +284,17 @@ int32_t aether_engine_forward(aether_engine_t *engine, int32_t token, int pos) {
         }
 
         /* E. Grouped-Query Attention (GQA) with Online Softmax */
-        const float *k_layer = s->key_cache + (size_t)l * cfg->seq_len * kv_dim;
-        const float *v_layer = s->val_cache + (size_t)l * cfg->seq_len * kv_dim;
-        noel_gqa_attention(s->xb2, s->q, k_layer, v_layer,
-                           cfg->n_heads, cfg->n_kv_heads, head_dim,
-                           cfg->seq_len, pos, num_p_threads);
+        if (engine->use_quantized_kv && engine->kv_cache.k_data) {
+            noel_gqa_attention_quantized(s->xb2, s->q, &engine->kv_cache, l,
+                                         cfg->n_heads, cfg->n_kv_heads, head_dim,
+                                         pos, num_p_threads);
+        } else {
+            const float *k_layer = s->key_cache + (size_t)l * cfg->seq_len * kv_dim;
+            const float *v_layer = s->val_cache + (size_t)l * cfg->seq_len * kv_dim;
+            noel_gqa_attention(s->xb2, s->q, k_layer, v_layer,
+                               cfg->n_heads, cfg->n_kv_heads, head_dim,
+                               cfg->seq_len, pos, num_p_threads);
+        }
 
         /* Attention Output Projection: xb = W_o * xb2 */
         if (w->is_bound_gguf && w->layer_tensors[l].attn_output) {
@@ -402,6 +419,9 @@ void aether_engine_reset_context(aether_engine_t *engine) {
     }
     if (engine->state.val_cache) {
         memset(engine->state.val_cache, 0, (size_t)engine->config.n_layers * engine->config.seq_len * kv_dim * sizeof(float));
+    }
+    if (engine->use_quantized_kv) {
+        noel_kv_cache_reset(&engine->kv_cache);
     }
 }
 
@@ -548,4 +568,7 @@ void aether_engine_shutdown(aether_engine_t *engine) {
     aether_tokenizer_free(&engine->tokenizer);
     noel_sampler_free(&engine->sampler);
     noel_cgraph_free(&engine->cgraph);
+    if (engine->use_quantized_kv) {
+        noel_kv_cache_free(&engine->kv_cache);
+    }
 }

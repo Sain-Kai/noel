@@ -14,6 +14,7 @@
 #include "attention.h"
 #include "sampler.h"
 #include "cgraph.h"
+#include "kv_cache.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,6 +101,9 @@ typedef struct {
     noel_sampler_t sampler;
     noel_sampler_config_t sampler_cfg;
     noel_cgraph_t cgraph;
+    noel_kv_cache_t kv_cache;
+    noel_kv_dtype_t kv_dtype;
+    bool use_quantized_kv;
     int cur_pos;               /* Persistent position in KV cache across conversational turns */
     bool is_gguf_loaded;
     bool has_gpu;
