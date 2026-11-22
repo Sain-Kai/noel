@@ -913,6 +913,109 @@ static bool test_direct_quantized_gqa_attention(void) {
     return (max_diff < 0.05f);
 }
 
+/* ------------------------------------------------------------------ */
+/* Test 20: Chunked Prompt Prefill Partitioning & Causal Masking      */
+/* ------------------------------------------------------------------ */
+static bool test_chunked_prefill_pipeline(void) {
+    int prompt_len = 100;
+    int chunk_size = 32;
+
+    int num_chunks = noel_prefill_calc_num_chunks(prompt_len, chunk_size);
+    if (num_chunks != 4) return false;
+
+    int32_t tokens[100];
+    for (int i = 0; i < 100; i++) tokens[i] = 1000 + i;
+
+    noel_prefill_chunk_t c0 = noel_prefill_get_chunk(tokens, prompt_len, chunk_size, 0);
+    noel_prefill_chunk_t c3 = noel_prefill_get_chunk(tokens, prompt_len, chunk_size, 3);
+
+    if (c0.start_pos != 0 || c0.num_tokens != 32 || c0.tokens[0] != 1000) return false;
+    if (c3.start_pos != 96 || c3.num_tokens != 4 || c3.tokens[0] != 1096) return false;
+
+    noel_prefill_state_t state;
+    if (!noel_prefill_state_init(&state, 32, 256, 64, 128)) return false;
+    if (!state.q_chunk || !state.k_chunk || !state.v_chunk || !state.xb_chunk) {
+        noel_prefill_state_free(&state);
+        return false;
+    }
+
+    noel_prefill_state_free(&state);
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Test 21: Speculative Rejection Sampling & Rollback Invariance      */
+/* ------------------------------------------------------------------ */
+static bool test_speculative_rejection_and_rollback(void) {
+    noel_speculative_config_t spec_cfg;
+    noel_speculative_config_init_default(&spec_cfg);
+    if (spec_cfg.num_speculative_tokens != NOEL_DEFAULT_SPEC_TOKENS) return false;
+
+    noel_speculative_state_t spec_state;
+    if (!noel_speculative_state_init(&spec_state, 4, 1024)) return false;
+
+    /* 1. Test guaranteed acceptance when target matches draft (P_t >= P_d) */
+    noel_speculative_proposal_t prop;
+    memset(&prop, 0, sizeof(prop));
+    prop.num_proposed = 3;
+    prop.tokens[0] = 42; prop.draft_probs[0] = 0.5f; prop.target_probs[0] = 0.5f;
+    prop.tokens[1] = 43; prop.draft_probs[1] = 0.4f; prop.target_probs[1] = 0.6f;
+    prop.tokens[2] = 44; prop.draft_probs[2] = 0.3f; prop.target_probs[2] = 0.8f;
+
+    int accepted = noel_speculative_sample_rejection(NULL, &spec_state, &prop);
+    if (accepted != 3 || prop.accepted_count != 3) {
+        noel_speculative_state_free(&spec_state);
+        return false;
+    }
+
+    /* 2. Test rejection when P_t = 0 */
+    memset(&prop, 0, sizeof(prop));
+    prop.num_proposed = 2;
+    prop.tokens[0] = 42; prop.draft_probs[0] = 0.5f; prop.target_probs[0] = 0.5f;
+    prop.tokens[1] = 99; prop.draft_probs[1] = 0.8f; prop.target_probs[1] = 0.0f;
+
+    accepted = noel_speculative_sample_rejection(NULL, &spec_state, &prop);
+    if (accepted != 1 || prop.accepted_count != 1) {
+        noel_speculative_state_free(&spec_state);
+        return false;
+    }
+
+    spec_state.total_draft_tokens = 5; /* 3 in prop 1 + 2 in prop 2 */
+    double acc_rate = noel_speculative_get_acceptance_rate(&spec_state);
+    if (acc_rate <= 0.0 || acc_rate > 1.0) {
+        noel_speculative_state_free(&spec_state);
+        return false;
+    }
+    noel_speculative_state_free(&spec_state);
+
+    /* 3. Test KV Cache transactional rollback */
+    noel_kv_cache_t cache;
+    noel_kv_cache_init(&cache, NOEL_KV_Q4_0, 2, 64, 2, 32);
+    int kv_dim = 2 * 32;
+    float row_val[64];
+    for (int i = 0; i < kv_dim; i++) row_val[i] = 1.0f;
+
+    for (int p = 0; p < 20; p++) {
+        noel_kv_cache_store(&cache, 0, p, row_val, row_val);
+    }
+
+    /* Rollback from 20 to 10 */
+    noel_kv_cache_rollback(&cache, 10, 20);
+
+    /* Verify pos 5 has data, pos 15 is zeroed */
+    float k_check[64], v_check[64];
+    noel_kv_cache_load(&cache, 0, 5, k_check, v_check);
+    float sum_5 = 0.0f;
+    for (int i = 0; i < kv_dim; i++) sum_5 += fabsf(k_check[i]);
+
+    noel_kv_cache_load(&cache, 0, 15, k_check, v_check);
+    float sum_15 = 0.0f;
+    for (int i = 0; i < kv_dim; i++) sum_15 += fabsf(k_check[i]);
+
+    noel_kv_cache_free(&cache);
+    return (sum_5 > 10.0f && sum_15 == 0.0f);
+}
+
 int main(void) {
     printf("=================================================================\n");
     printf("        AETHER INFERENCE ENGINE: AUTOMATED TEST HARNESS          \n");
@@ -959,6 +1062,10 @@ int main(void) {
     printf("\n--- Quantized KV Cache & Attention Tests ---\n");
     RUN_TEST("Quantized KV Cache Precision & Compression", test_quantized_kv_cache_compression);
     RUN_TEST("Direct Quantized GQA Attention Kernel", test_direct_quantized_gqa_attention);
+
+    printf("\n--- Speculative Decoding & Chunked Prefill Tests ---\n");
+    RUN_TEST("Chunked Prompt Prefill Partitioning", test_chunked_prefill_pipeline);
+    RUN_TEST("Speculative Rejection & Rollback Invariance", test_speculative_rejection_and_rollback);
 
     printf("\n=================================================================\n");
     printf("  TEST RESULTS: %d / %d Passed (%.1f%%)\n",
