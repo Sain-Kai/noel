@@ -281,3 +281,211 @@ void noel_dequantize_row_fp8_e5m2(float *dst, const uint8_t *src, int n, float s
         dst[i] = noel_fp8_e5m2_to_f32(src[i]) * scale;
     }
 }
+
+/* ------------------------------------------------------------- */
+/* Block-Quantized Q8_0 and Q4_0 Codecs                          */
+/* ------------------------------------------------------------- */
+
+void noel_quantize_row_q8_0(block_q8_0 *dst, const float *src, int n) {
+    if (!dst || !src || n <= 0) return;
+    int nb = (n + NOEL_BLOCK_SIZE - 1) / NOEL_BLOCK_SIZE;
+
+    for (int b = 0; b < nb; b++) {
+        int offset = b * NOEL_BLOCK_SIZE;
+        int rem = n - offset;
+        int count = rem < NOEL_BLOCK_SIZE ? rem : NOEL_BLOCK_SIZE;
+
+        float max_abs = 0.0f;
+        for (int i = 0; i < count; i++) {
+            float a = fabsf(src[offset + i]);
+            if (a > max_abs) max_abs = a;
+        }
+
+        float scale = max_abs / 127.0f;
+        float inv_scale = (scale > 1e-12f) ? (1.0f / scale) : 0.0f;
+        dst[b].scale = scale;
+
+        for (int i = 0; i < count; i++) {
+            float v = src[offset + i] * inv_scale;
+            int q = (int)roundf(v);
+            if (q > 127) q = 127;
+            if (q < -128) q = -128;
+            dst[b].qs[i] = (int8_t)q;
+        }
+        for (int i = count; i < NOEL_BLOCK_SIZE; i++) {
+            dst[b].qs[i] = 0;
+        }
+    }
+}
+
+void noel_dequantize_row_q8_0(float *dst, const block_q8_0 *src, int n) {
+    if (!dst || !src || n <= 0) return;
+    int nb = (n + NOEL_BLOCK_SIZE - 1) / NOEL_BLOCK_SIZE;
+
+    for (int b = 0; b < nb; b++) {
+        int offset = b * NOEL_BLOCK_SIZE;
+        int rem = n - offset;
+        int count = rem < NOEL_BLOCK_SIZE ? rem : NOEL_BLOCK_SIZE;
+        float scale = src[b].scale;
+
+        for (int i = 0; i < count; i++) {
+            dst[offset + i] = (float)src[b].qs[i] * scale;
+        }
+    }
+}
+
+void noel_quantize_row_q4_0(block_q4_0 *dst, const float *src, int n) {
+    if (!dst || !src || n <= 0) return;
+    int nb = (n + NOEL_BLOCK_SIZE - 1) / NOEL_BLOCK_SIZE;
+
+    for (int b = 0; b < nb; b++) {
+        int offset = b * NOEL_BLOCK_SIZE;
+        int rem = n - offset;
+        int count = rem < NOEL_BLOCK_SIZE ? rem : NOEL_BLOCK_SIZE;
+
+        float max_abs = 0.0f;
+        for (int i = 0; i < count; i++) {
+            float a = fabsf(src[offset + i]);
+            if (a > max_abs) max_abs = a;
+        }
+
+        float scale = max_abs / -8.0f;
+        float inv_scale = (scale != 0.0f) ? (1.0f / scale) : 0.0f;
+        dst[b].scale = scale;
+
+        for (int i = 0; i < 16; i++) {
+            float x0 = (i < count) ? src[offset + i] : 0.0f;
+            float x1 = (i + 16 < count) ? src[offset + i + 16] : 0.0f;
+
+            int q0 = (int)roundf(x0 * inv_scale) + 8;
+            int q1 = (int)roundf(x1 * inv_scale) + 8;
+            if (q0 < 0) q0 = 0;
+            if (q0 > 15) q0 = 15;
+            if (q1 < 0) q1 = 0;
+            if (q1 > 15) q1 = 15;
+
+            dst[b].qs[i] = (uint8_t)((q0 & 0x0F) | ((q1 & 0x0F) << 4));
+        }
+    }
+}
+
+void noel_dequantize_row_q4_0(float *dst, const block_q4_0 *src, int n) {
+    if (!dst || !src || n <= 0) return;
+    int nb = (n + NOEL_BLOCK_SIZE - 1) / NOEL_BLOCK_SIZE;
+
+    for (int b = 0; b < nb; b++) {
+        int offset = b * NOEL_BLOCK_SIZE;
+        int rem = n - offset;
+        int count = rem < NOEL_BLOCK_SIZE ? rem : NOEL_BLOCK_SIZE;
+        float scale = src[b].scale;
+
+        for (int i = 0; i < 16; i++) {
+            uint8_t v = src[b].qs[i];
+            int q0 = (v & 0x0F) - 8;
+            int q1 = ((v >> 4) & 0x0F) - 8;
+
+            if (i < count) dst[offset + i] = (float)q0 * scale;
+            if (i + 16 < count) dst[offset + i + 16] = (float)q1 * scale;
+        }
+    }
+}
+
+void noel_kv_cache_store(noel_kv_cache_t *cache, int layer, int pos, const float *k, const float *v) {
+    if (!cache || !k || !v || layer < 0 || layer >= cache->n_layers || pos < 0 || pos >= cache->seq_len) return;
+
+    size_t row_idx = (size_t)layer * cache->seq_len + pos;
+    size_t byte_offset = row_idx * cache->row_bytes;
+    int kv_dim = cache->kv_dim;
+
+    switch (cache->dtype) {
+        case NOEL_KV_FP32: {
+            float *k_dst = (float *)((uint8_t *)cache->k_data + byte_offset);
+            float *v_dst = (float *)((uint8_t *)cache->v_data + byte_offset);
+            memcpy(k_dst, k, kv_dim * sizeof(float));
+            memcpy(v_dst, v, kv_dim * sizeof(float));
+            break;
+        }
+        case NOEL_KV_FP8_E4M3: {
+            uint8_t *k_dst = (uint8_t *)cache->k_data + byte_offset;
+            uint8_t *v_dst = (uint8_t *)cache->v_data + byte_offset;
+            float *k_sc = cache->k_scales + row_idx * cache->n_kv_heads;
+            float *v_sc = cache->v_scales + row_idx * cache->n_kv_heads;
+            noel_quantize_row_fp8_e4m3(k_dst, k, kv_dim, k_sc);
+            noel_quantize_row_fp8_e4m3(v_dst, v, kv_dim, v_sc);
+            break;
+        }
+        case NOEL_KV_FP8_E5M2: {
+            uint8_t *k_dst = (uint8_t *)cache->k_data + byte_offset;
+            uint8_t *v_dst = (uint8_t *)cache->v_data + byte_offset;
+            float *k_sc = cache->k_scales + row_idx * cache->n_kv_heads;
+            float *v_sc = cache->v_scales + row_idx * cache->n_kv_heads;
+            noel_quantize_row_fp8_e5m2(k_dst, k, kv_dim, k_sc);
+            noel_quantize_row_fp8_e5m2(v_dst, v, kv_dim, v_sc);
+            break;
+        }
+        case NOEL_KV_Q8_0: {
+            block_q8_0 *k_dst = (block_q8_0 *)((uint8_t *)cache->k_data + byte_offset);
+            block_q8_0 *v_dst = (block_q8_0 *)((uint8_t *)cache->v_data + byte_offset);
+            noel_quantize_row_q8_0(k_dst, k, kv_dim);
+            noel_quantize_row_q8_0(v_dst, v, kv_dim);
+            break;
+        }
+        case NOEL_KV_Q4_0: {
+            block_q4_0 *k_dst = (block_q4_0 *)((uint8_t *)cache->k_data + byte_offset);
+            block_q4_0 *v_dst = (block_q4_0 *)((uint8_t *)cache->v_data + byte_offset);
+            noel_quantize_row_q4_0(k_dst, k, kv_dim);
+            noel_quantize_row_q4_0(v_dst, v, kv_dim);
+            break;
+        }
+    }
+}
+
+void noel_kv_cache_load(const noel_kv_cache_t *cache, int layer, int pos, float *k_out, float *v_out) {
+    if (!cache || layer < 0 || layer >= cache->n_layers || pos < 0 || pos >= cache->seq_len) return;
+
+    size_t row_idx = (size_t)layer * cache->seq_len + pos;
+    size_t byte_offset = row_idx * cache->row_bytes;
+    int kv_dim = cache->kv_dim;
+
+    switch (cache->dtype) {
+        case NOEL_KV_FP32: {
+            const float *k_src = (const float *)((const uint8_t *)cache->k_data + byte_offset);
+            const float *v_src = (const float *)((const uint8_t *)cache->v_data + byte_offset);
+            if (k_out) memcpy(k_out, k_src, kv_dim * sizeof(float));
+            if (v_out) memcpy(v_out, v_src, kv_dim * sizeof(float));
+            break;
+        }
+        case NOEL_KV_FP8_E4M3: {
+            const uint8_t *k_src = (const uint8_t *)cache->k_data + byte_offset;
+            const uint8_t *v_src = (const uint8_t *)cache->v_data + byte_offset;
+            float k_sc = cache->k_scales ? cache->k_scales[row_idx * cache->n_kv_heads] : 1.0f;
+            float v_sc = cache->v_scales ? cache->v_scales[row_idx * cache->n_kv_heads] : 1.0f;
+            if (k_out) noel_dequantize_row_fp8_e4m3(k_out, k_src, kv_dim, k_sc);
+            if (v_out) noel_dequantize_row_fp8_e4m3(v_out, v_src, kv_dim, v_sc);
+            break;
+        }
+        case NOEL_KV_FP8_E5M2: {
+            const uint8_t *k_src = (const uint8_t *)cache->k_data + byte_offset;
+            const uint8_t *v_src = (const uint8_t *)cache->v_data + byte_offset;
+            float k_sc = cache->k_scales ? cache->k_scales[row_idx * cache->n_kv_heads] : 1.0f;
+            float v_sc = cache->v_scales ? cache->v_scales[row_idx * cache->n_kv_heads] : 1.0f;
+            if (k_out) noel_dequantize_row_fp8_e5m2(k_out, k_src, kv_dim, k_sc);
+            if (v_out) noel_dequantize_row_fp8_e5m2(v_out, v_src, kv_dim, v_sc);
+            break;
+        }
+        case NOEL_KV_Q8_0: {
+            const block_q8_0 *k_src = (const block_q8_0 *)((const uint8_t *)cache->k_data + byte_offset);
+            const block_q8_0 *v_src = (const block_q8_0 *)((const uint8_t *)cache->v_data + byte_offset);
+            if (k_out) noel_dequantize_row_q8_0(k_out, k_src, kv_dim);
+            if (v_out) noel_dequantize_row_q8_0(v_out, v_src, kv_dim);
+            break;
+        }
+        case NOEL_KV_Q4_0: {
+            const block_q4_0 *k_src = (const block_q4_0 *)((const uint8_t *)cache->k_data + byte_offset);
+            const block_q4_0 *v_src = (const block_q4_0 *)((const uint8_t *)cache->v_data + byte_offset);
+            if (k_out) noel_dequantize_row_q4_0(k_out, k_src, kv_dim);
+            if (v_out) noel_dequantize_row_q4_0(v_out, v_src, kv_dim);
+            break;
+        }
+    }
+}

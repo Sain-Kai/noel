@@ -62,6 +62,16 @@ void noel_dequantize_row_fp8_e4m3(float *dst, const uint8_t *src, int n, float s
 void noel_quantize_row_fp8_e5m2(uint8_t *dst, const float *src, int n, float *out_scale);
 void noel_dequantize_row_fp8_e5m2(float *dst, const uint8_t *src, int n, float scale);
 
+/* Block-Quantized Q8_0 and Q4_0 Codecs */
+void noel_quantize_row_q8_0(block_q8_0 *dst, const float *src, int n);
+void noel_dequantize_row_q8_0(float *dst, const block_q8_0 *src, int n);
+void noel_quantize_row_q4_0(block_q4_0 *dst, const float *src, int n);
+void noel_dequantize_row_q4_0(float *dst, const block_q4_0 *src, int n);
+
+/* High-Level KV Cache Store & Load */
+void noel_kv_cache_store(noel_kv_cache_t *cache, int layer, int pos, const float *k, const float *v);
+void noel_kv_cache_load(const noel_kv_cache_t *cache, int layer, int pos, float *k_out, float *v_out);
+
 #ifdef __cplusplus
 }
 #endif
